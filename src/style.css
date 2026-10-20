@@ -1,0 +1,57 @@
+:root {
+  color-scheme: light;
+  --bg: var(--color-bg, #f5f6f8);
+  --panel: var(--color-surface, #ffffff);
+  --panel-soft: var(--color-surface-secondary, #f9fafb);
+  --text: var(--color-text, #1b1f27);
+  --muted: var(--color-text-secondary, #6b7280);
+  --border: var(--color-border, #e4e7ec);
+  --accent: var(--color-primary, #3355ff);
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+  --success: #1a9e6d;
+  --danger: #d64545;
+  --radius: var(--radius-md, 12px);
+  --radius-sm: var(--radius-sm, 8px);
+  --font: var(--font-sans, "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif);
+  --mono: var(--font-mono, "JetBrains Mono", "Cascadia Code", Consolas, monospace);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #14161b;
+  --panel: #1c1f26;
+  --panel-soft: #22262e;
+  --text: #e8ebf0;
+  --muted: #9aa3b2;
+  --border: #2b303a;
+  --accent-soft: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+code,
+pre {
+  font-family: var(--mono);
+}

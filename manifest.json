@@ -1,0 +1,198 @@
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/main/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "io.github.nixing178.jenkins",
+  "name": "Jenkins Console",
+  "version": "0.3.0",
+  "publisher": "nixing178",
+  "description": "Manage Jenkins jobs, builds, console output, queue and nodes inside DBX.",
+  "source": "https://github.com/nixing178/dbx-plugin-jenkins",
+  "homepage": "https://github.com/nixing178/dbx-plugin-jenkins",
+  "icon": "assets/plugin.svg",
+  "engines": {
+    "dbx": ">=0.6.43",
+    "host_api": "1"
+  },
+  "permissions": [
+    "host.workbench",
+    "host.events"
+  ],
+  "entrypoints": {
+    "backend": {
+      "executable": "bin/dbx-plugin-jenkins"
+    },
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "connection-provider",
+      "id": "io.github.nixing178.jenkins.connection",
+      "label": "Jenkins",
+      "icon": "assets/connection.svg",
+      "database_type": "jenkins",
+      "description": "Connect to a Jenkins controller with an API token.",
+      "fields": [
+        {
+          "key": "display_name",
+          "label": "Connection name",
+          "type": "text",
+          "default": "Jenkins",
+          "binding": "name",
+          "required": true
+        },
+        {
+          "key": "scheme",
+          "label": "Protocol",
+          "type": "select",
+          "binding": "config",
+          "default": "https",
+          "options": [
+            { "label": "HTTPS", "value": "https" },
+            { "label": "HTTP (internal network)", "value": "http" }
+          ]
+        },
+        {
+          "key": "host",
+          "label": "Host / domain",
+          "type": "text",
+          "binding": "host",
+          "placeholder": "ci.example.com",
+          "required": true
+        },
+        {
+          "key": "port",
+          "label": "Port",
+          "type": "number",
+          "binding": "port",
+          "default": 8080,
+          "required": true
+        },
+        {
+          "key": "base_path",
+          "label": "Context path",
+          "type": "text",
+          "binding": "config",
+          "default": "",
+          "placeholder": "/jenkins"
+        },
+        {
+          "key": "username",
+          "label": "Username",
+          "type": "text",
+          "binding": "username",
+          "placeholder": "Leave empty for anonymous read-only access"
+        },
+        {
+          "key": "api_token",
+          "label": "API token",
+          "type": "password",
+          "binding": "secret",
+          "placeholder": "User profile → API Token"
+        },
+        {
+          "key": "read_only",
+          "label": "Read-only mode",
+          "type": "boolean",
+          "binding": "config",
+          "default": true
+        },
+        {
+          "key": "insecure_skip_verify",
+          "label": "Skip TLS certificate verification",
+          "type": "boolean",
+          "binding": "config",
+          "default": false
+        },
+        {
+          "key": "connect_timeout_secs",
+          "label": "Connect timeout (seconds)",
+          "type": "number",
+          "binding": "config",
+          "default": 15
+        }
+      ],
+      "workbench": "io.github.nixing178.jenkins.workbench",
+      "capabilities": ["test", "connect", "disconnect"]
+    },
+    {
+      "type": "workbench",
+      "id": "io.github.nixing178.jenkins.workbench",
+      "label": "Jenkins Console",
+      "description": "Browse jobs, builds, console output, queue and nodes of a Jenkins controller.",
+      "icon": "assets/plugin.svg"
+    },
+    {
+      "type": "mcp",
+      "id": "io.github.nixing178.jenkins.mcp",
+      "description": "Jenkins jobs, builds, console logs, queue and nodes tools.",
+      "ai_tools": true,
+      "external_tools": false
+    }
+  ],
+  "localizations": {
+    "en": {
+      "name": "Jenkins Console",
+      "description": "Manage Jenkins jobs, builds, console output, queue and nodes inside DBX.",
+      "contributions": {
+        "io.github.nixing178.jenkins.connection": {
+          "label": "Jenkins",
+          "description": "Connect to a Jenkins controller with an API token.",
+          "fields": {
+            "display_name": { "label": "Connection name" },
+            "scheme": {
+              "label": "Protocol",
+              "options": { "https": "HTTPS", "http": "HTTP (internal network)" }
+            },
+            "host": { "label": "Host / domain", "placeholder": "ci.example.com" },
+            "port": { "label": "Port" },
+            "base_path": { "label": "Context path", "placeholder": "/jenkins" },
+            "username": {
+              "label": "Username",
+              "placeholder": "Leave empty for anonymous read-only access"
+            },
+            "api_token": { "label": "API token", "placeholder": "User profile → API Token" },
+            "read_only": { "label": "Read-only mode" },
+            "insecure_skip_verify": { "label": "Skip TLS certificate verification" },
+            "connect_timeout_secs": { "label": "Connect timeout (seconds)" }
+          }
+        },
+        "io.github.nixing178.jenkins.workbench": {
+          "label": "Jenkins Console",
+          "description": "Browse jobs, builds, console output, queue and nodes of a Jenkins controller."
+        }
+      }
+    },
+    "zh-CN": {
+      "name": "Jenkins 管理台",
+      "description": "在 DBX 内管理 Jenkins 任务、构建、控制台日志、队列与节点。",
+      "contributions": {
+        "io.github.nixing178.jenkins.connection": {
+          "label": "Jenkins 连接",
+          "description": "使用 API Token 连接 Jenkins 控制器。",
+          "fields": {
+            "display_name": { "label": "连接名称" },
+            "scheme": {
+              "label": "协议",
+              "options": { "https": "HTTPS", "http": "HTTP（内网）" }
+            },
+            "host": { "label": "IP / 域名", "placeholder": "ci.example.com" },
+            "port": { "label": "端口" },
+            "base_path": { "label": "上下文路径", "placeholder": "/jenkins" },
+            "username": { "label": "用户名", "placeholder": "留空表示匿名只读访问" },
+            "api_token": { "label": "API Token", "placeholder": "用户设置 → API Token" },
+            "read_only": { "label": "只读模式" },
+            "insecure_skip_verify": { "label": "跳过 TLS 证书校验" },
+            "connect_timeout_secs": { "label": "连接超时（秒）" }
+          }
+        },
+        "io.github.nixing178.jenkins.workbench": {
+          "label": "Jenkins 管理台",
+          "description": "浏览 Jenkins 的任务、构建、控制台日志、队列与节点。"
+        }
+      }
+    }
+  }
+}

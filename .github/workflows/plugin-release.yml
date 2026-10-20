@@ -1,0 +1,21 @@
+name: Release DBX plugin
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@plugin-cli-v0.1.9
+    with:
+      release-tag: ${{ github.event.release.tag_name }}
+      # ui/ 与 dist/ 不进 Git，CI 必须从源码构建 UI 再打包
+      package-command: npm install -g pnpm@10.11.0 && pnpm install --frozen-lockfile && pnpm build && dbx-plugin package .
+      package-path: dist/*.dbxp
+      metadata-path: dist/*.artifact.json
+      plugin-cli-version: 0.1.9
+      # 首发只发布 Windows x64；Go sidecar 交叉编译待验证后再扩平台
+      build-matrix: '{"include":[{"runner":"windows-2022","target":"windows-x64"}]}'

@@ -1,0 +1,1071 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import logoUrl from "../assets/plugin.svg";
+import { describeError, jenkinsApi, setConnectionId } from "./api";
+import BuildView from "./components/BuildView.vue";
+import ConfirmDelete from "./components/ConfirmDelete.vue";
+import JobEditor from "./components/JobEditor.vue";
+import JobList from "./components/JobList.vue";
+import JobView from "./components/JobView.vue";
+import NodesView from "./components/NodesView.vue";
+import OverviewView from "./components/OverviewView.vue";
+import ParamDialog from "./components/ParamDialog.vue";
+import QueueView from "./components/QueueView.vue";
+import StageView from "./components/StageView.vue";
+import ViewEditor from "./components/ViewEditor.vue";
+import { locale, syncLocale, t } from "./i18n";
+import { errorText } from "./lib/errors";
+import type {
+  BuildDetail,
+  BuildSummary,
+  CreateJobPayload,
+  CreateViewPayload,
+  JobConfigResponse,
+  JobDetail,
+  JobSummary,
+  JobUpdateFields,
+  NodeInfo,
+  Overview,
+  QueueItem,
+  StageMatrix,
+  ViewConfigResponse,
+  ViewInfo,
+  ViewUpdateFields,
+} from "./types";
+
+interface Identity {
+  name: string;
+  version: string;
+  mode: string;
+}
+
+const connectionName = ref("");
+const identity = ref<Identity | null>(null);
+const readOnly = ref(true);
+
+const view = ref<"overview" | "jobs" | "build" | "stages" | "queue" | "nodes">("overview");
+const folder = ref("");
+const jobs = ref<JobSummary[]>([]);
+const views = ref<ViewInfo[]>([]);
+const activeView = ref("");
+const selectedJob = ref<JobDetail | null>(null);
+const builds = ref<BuildSummary[]>([]);
+const selectedBuild = ref<BuildDetail | null>(null);
+const stageMatrix = ref<StageMatrix | null>(null);
+const loadingStages = ref(false);
+const buildReturnView = ref<"jobs" | "stages">("jobs");
+const overview = ref<Overview | null>(null);
+const queueItems = ref<QueueItem[]>([]);
+const nodes = ref<NodeInfo[]>([]);
+
+const loadingJobs = ref(false);
+const loadingJob = ref(false);
+const loadingBuilds = ref(false);
+const loadingView = ref(false);
+const showParams = ref(false);
+const errorMessage = ref("");
+const notice = ref("");
+let noticeTimer: number | undefined;
+
+type JobEditorState =
+  | { mode: "create" }
+  | { mode: "edit"; config: JobConfigResponse };
+
+type ViewEditorState =
+  | { mode: "create" }
+  | { mode: "edit"; view: ViewInfo; config: ViewConfigResponse };
+
+interface DeleteTarget {
+  kind: "job" | "view";
+  name: string;
+  fullName?: string;
+}
+
+const jobEditor = ref<JobEditorState | null>(null);
+const viewEditor = ref<ViewEditorState | null>(null);
+const deleteTarget = ref<DeleteTarget | null>(null);
+const editorBusy = ref(false);
+const viewJobPool = ref<string[]>([]);
+
+const canManageView = computed(
+  () => activeView.value !== "" && activeView.value.toLowerCase() !== "all",
+);
+
+const connectionLabel = computed(() => {
+  if (identity.value?.version) return `Jenkins ${identity.value.version}`;
+  return connectionName.value || t("unknownConnection");
+});
+
+const isPipeline = computed(() =>
+  (selectedJob.value?.class ?? "").toLowerCase().includes("workflowjob"),
+);
+
+let jobsToken = 0;
+let selectToken = 0;
+
+function setError(error: unknown): void {
+  errorMessage.value = errorText(describeError(error), locale.value);
+}
+
+function showNotice(message: string): void {
+  notice.value = message;
+  if (noticeTimer) window.clearTimeout(noticeTimer);
+  noticeTimer = window.setTimeout(() => (notice.value = ""), 4000);
+}
+
+async function loadJobs(path: string): Promise<void> {
+  const token = ++jobsToken;
+  loadingJobs.value = true;
+  errorMessage.value = "";
+  try {
+    const useView = path === "" && activeView.value !== "";
+    const result = useView
+      ? await jenkinsApi.jobs("", activeView.value)
+      : await jenkinsApi.jobs(path, "");
+    if (token !== jobsToken) return;
+
+    jobs.value = result.jobs;
+    folder.value = path;
+
+    const current = selectedJob.value?.fullName;
+    const stillThere = current
+      ? result.jobs.some((job) => job.fullName === current)
+      : false;
+    if (!stillThere) {
+      const first = result.jobs.find((job) => !job.isFolder);
+      if (first) {
+        void selectJob(first);
+      } else {
+        selectedJob.value = null;
+        builds.value = [];
+        selectedBuild.value = null;
+        stageMatrix.value = null;
+      }
+    }
+  } catch (error) {
+    if (token === jobsToken) setError(error);
+  } finally {
+    if (token === jobsToken) loadingJobs.value = false;
+  }
+}
+
+async function loadViews(): Promise<void> {
+  try {
+    const result = await jenkinsApi.views();
+    views.value = result.views.length
+      ? result.views
+      : [{ name: "", description: "", url: "" }];
+  } catch {
+    // 旧 Jenkins 或权限受限时回退为单个「全部任务」。
+    views.value = [{ name: "", description: "", url: "" }];
+  }
+
+  if (!views.value.some((item) => item.name === activeView.value)) {
+    const preferred =
+      views.value.find((item) => item.name.toLowerCase() === "all") ?? views.value[0];
+    activeView.value = preferred.name;
+  }
+}
+
+async function activateView(name: string): Promise<void> {
+  activeView.value = name;
+  folder.value = "";
+  selectedJob.value = null;
+  selectedBuild.value = null;
+  stageMatrix.value = null;
+  builds.value = [];
+  view.value = "jobs";
+  await loadJobs("");
+}
+
+async function loadOverview(): Promise<void> {
+  loadingView.value = true;
+  errorMessage.value = "";
+  try {
+    overview.value = await jenkinsApi.overview();
+  } catch (error) {
+    setError(error);
+  } finally {
+    loadingView.value = false;
+  }
+}
+
+async function loadQueue(): Promise<void> {
+  loadingView.value = true;
+  errorMessage.value = "";
+  try {
+    const result = await jenkinsApi.queue();
+    queueItems.value = result.items;
+  } catch (error) {
+    setError(error);
+  } finally {
+    loadingView.value = false;
+  }
+}
+
+async function loadNodes(): Promise<void> {
+  loadingView.value = true;
+  errorMessage.value = "";
+  try {
+    const result = await jenkinsApi.nodes();
+    nodes.value = result.nodes;
+  } catch (error) {
+    setError(error);
+  } finally {
+    loadingView.value = false;
+  }
+}
+
+async function switchView(next: "overview" | "jobs" | "queue" | "nodes"): Promise<void> {
+  view.value = next;
+  if (next === "overview") await loadOverview();
+  else if (next === "queue") await loadQueue();
+  else if (next === "nodes") await loadNodes();
+  else if (next === "jobs") {
+    if (!views.value.length) await loadViews();
+    if (!jobs.value.length) await loadJobs("");
+  }
+}
+
+async function cancelQueueItem(id: number): Promise<void> {
+  if (!window.confirm(t("cancelConfirm", { id }))) return;
+  try {
+    await jenkinsApi.cancelQueue(id);
+    showNotice(t("cancelSuccess"));
+    await loadQueue();
+  } catch (error) {
+    setError(error);
+  }
+}
+
+async function loadIdentity(): Promise<void> {
+  errorMessage.value = "";
+  try {
+    const result = await jenkinsApi.whoami();
+    readOnly.value = result.readOnly;
+    identity.value = {
+      name: result.user?.name ?? "",
+      version: result.user?.version ?? "",
+      mode: result.user?.mode ?? "",
+    };
+    await Promise.all([loadOverview(), loadViews()]);
+  } catch (error) {
+    setError(error);
+  }
+}
+
+async function selectJob(job: JobSummary): Promise<void> {
+  const token = ++selectToken;
+  view.value = "jobs";
+  selectedBuild.value = null;
+  stageMatrix.value = null;
+  loadingJob.value = true;
+  loadingBuilds.value = true;
+  errorMessage.value = "";
+  try {
+    const [detail, list] = await Promise.all([
+      jenkinsApi.job(job.fullName),
+      jenkinsApi.builds(job.fullName, 20),
+    ]);
+    if (token !== selectToken) return;
+    selectedJob.value = detail;
+    builds.value = list.builds;
+  } catch (error) {
+    if (token === selectToken) setError(error);
+  } finally {
+    if (token === selectToken) {
+      loadingJob.value = false;
+      loadingBuilds.value = false;
+    }
+  }
+}
+
+async function refreshJob(): Promise<void> {
+  if (!selectedJob.value) {
+    await loadJobs(folder.value);
+    return;
+  }
+  const current = selectedJob.value.fullName;
+  const entry = jobs.value.find((job) => job.fullName === current);
+  if (entry) await selectJob(entry);
+}
+
+async function openBuild(number: number, rememberReturn = true): Promise<void> {
+  if (!selectedJob.value) return;
+  if (rememberReturn) {
+    buildReturnView.value = view.value === "stages" ? "stages" : "jobs";
+  }
+  loadingBuilds.value = true;
+  errorMessage.value = "";
+  try {
+    selectedBuild.value = await jenkinsApi.build(selectedJob.value.fullName, number);
+    view.value = "build";
+  } catch (error) {
+    setError(error);
+  } finally {
+    loadingBuilds.value = false;
+  }
+}
+
+async function refreshBuild(): Promise<void> {
+  if (!selectedBuild.value || !selectedJob.value) return;
+  await openBuild(selectedBuild.value.number, false);
+}
+
+function closeBuild(): void {
+  view.value = buildReturnView.value === "stages" ? "stages" : "jobs";
+  if (view.value === "stages") refreshStages();
+}
+
+async function loadStages(job: string): Promise<void> {
+  loadingStages.value = true;
+  errorMessage.value = "";
+  try {
+    stageMatrix.value = await jenkinsApi.stages(job, 10);
+  } catch (error) {
+    stageMatrix.value = null;
+    setError(error);
+  } finally {
+    loadingStages.value = false;
+  }
+}
+
+async function openStages(): Promise<void> {
+  if (!selectedJob.value || !isPipeline.value) return;
+  view.value = "stages";
+  await loadStages(selectedJob.value.fullName);
+}
+
+function refreshStages(): void {
+  if (selectedJob.value) void loadStages(selectedJob.value.fullName);
+}
+
+async function triggerBuild(params: Record<string, unknown> = {}): Promise<void> {
+  if (!selectedJob.value) return;
+  try {
+    const result = await jenkinsApi.trigger(selectedJob.value.fullName, params);
+    showNotice(t("buildQueued", { queueId: result.queueId || "?" }));
+    window.setTimeout(() => void refreshJob(), 1200);
+  } catch (error) {
+    setError(error);
+  }
+}
+
+async function stopBuild(number: number): Promise<void> {
+  if (!selectedJob.value) return;
+  if (!window.confirm(t("stopConfirm", { number }))) return;
+  try {
+    await jenkinsApi.stop(selectedJob.value.fullName, number);
+    showNotice(t("stopSuccess"));
+    window.setTimeout(() => {
+      void refreshJob();
+      if (view.value === "build") void refreshBuild();
+    }, 800);
+  } catch (error) {
+    setError(error);
+  }
+}
+
+async function stopLastBuild(): Promise<void> {
+  const number = selectedJob.value?.lastBuild?.number;
+  if (number) await stopBuild(number);
+}
+
+function submitParams(params: Record<string, unknown>): void {
+  showParams.value = false;
+  void triggerBuild(params);
+}
+
+/** 只读连接下所有 CRUD 入口统一拦截。 */
+function guardWrite(): boolean {
+  if (!readOnly.value) return true;
+  showNotice(t("readOnlyManageHint"));
+  return false;
+}
+
+async function loadViewJobPool(): Promise<void> {
+  try {
+    const result = await jenkinsApi.jobs("", "");
+    viewJobPool.value = result.jobs
+      .filter((job) => !job.isFolder)
+      .map((job) => job.fullName);
+  } catch {
+    viewJobPool.value = jobs.value
+      .filter((job) => !job.isFolder)
+      .map((job) => job.fullName);
+  }
+}
+
+async function selectByFullName(fullName: string): Promise<void> {
+  const entry = jobs.value.find((job) => job.fullName === fullName);
+  if (entry) await selectJob(entry);
+}
+
+async function openCreateJob(): Promise<void> {
+  if (!guardWrite()) return;
+  errorMessage.value = "";
+  jobEditor.value = { mode: "create" };
+}
+
+async function openEditJob(): Promise<void> {
+  if (!selectedJob.value || !guardWrite()) return;
+  editorBusy.value = true;
+  errorMessage.value = "";
+  try {
+    const config = await jenkinsApi.jobConfig(selectedJob.value.fullName);
+    jobEditor.value = { mode: "edit", config };
+  } catch (error) {
+    setError(error);
+  } finally {
+    editorBusy.value = false;
+  }
+}
+
+async function createJob(payload: CreateJobPayload): Promise<void> {
+  editorBusy.value = true;
+  errorMessage.value = "";
+  try {
+    const result = await jenkinsApi.createJob(payload);
+    jobEditor.value = null;
+    showNotice(t("jobCreated", { name: result.fullName ?? payload.name }));
+    await loadJobs(folder.value);
+    if (result.fullName) await selectByFullName(result.fullName);
+  } catch (error) {
+    setError(error);
+  } finally {
+    editorBusy.value = false;
+  }
+}
+
+async function updateJob(fields: JobUpdateFields): Promise<void> {
+  if (!selectedJob.value) return;
+  const previous = selectedJob.value.fullName;
+  editorBusy.value = true;
+  errorMessage.value = "";
+  try {
+    const result = await jenkinsApi.updateJob(previous, fields);
+    jobEditor.value = null;
+    showNotice(t("jobUpdated"));
+    await loadJobs(folder.value);
+    await selectByFullName(result.fullName ?? previous);
+  } catch (error) {
+    setError(error);
+  } finally {
+    editorBusy.value = false;
+  }
+}
+
+async function saveJobXml(xml: string): Promise<void> {
+  if (!selectedJob.value) return;
+  const fullName = selectedJob.value.fullName;
+  editorBusy.value = true;
+  errorMessage.value = "";
+  try {
+    await jenkinsApi.saveJob(fullName, xml);
+    jobEditor.value = null;
+    showNotice(t("jobUpdated"));
+    await loadJobs(folder.value);
+    await selectByFullName(fullName);
+  } catch (error) {
+    setError(error);
+  } finally {
+    editorBusy.value = false;
+  }
+}
+
+async function openCreateView(): Promise<void> {
+  if (!guardWrite()) return;
+  errorMessage.value = "";
+  await loadViewJobPool();
+  viewEditor.value = { mode: "create" };
+}
+
+async function openEditView(): Promise<void> {
+  if (!canManageView.value || !guardWrite()) return;
+  const name = activeView.value;
+  editorBusy.value = true;
+  errorMessage.value = "";
+  try {
+    const [config] = await Promise.all([jenkinsApi.viewConfig(name), loadViewJobPool()]);
+    const view = views.value.find((item) => item.name === name) ?? {
+      name,
+      description: "",
+      url: "",
+    };
+    viewEditor.value = { mode: "edit", view, config };
+  } catch (error) {
+    setError(error);
+  } finally {
+    editorBusy.value = false;
+  }
+}
+
+async function createView(payload: CreateViewPayload): Promise<void> {
+  editorBusy.value = true;
+  errorMessage.value = "";
+  try {
+    await jenkinsApi.createView(payload);
+    viewEditor.value = null;
+    showNotice(t("viewCreated", { name: payload.name }));
+    await loadViews();
+    activeView.value = payload.name;
+    folder.value = "";
+    await loadJobs("");
+  } catch (error) {
+    setError(error);
+  } finally {
+    editorBusy.value = false;
+  }
+}
+
+async function updateView(fields: ViewUpdateFields): Promise<void> {
+  const name = activeView.value;
+  editorBusy.value = true;
+  errorMessage.value = "";
+  try {
+    await jenkinsApi.updateView(name, fields);
+    viewEditor.value = null;
+    showNotice(t("viewUpdated"));
+    await loadViews();
+    await loadJobs("");
+  } catch (error) {
+    setError(error);
+  } finally {
+    editorBusy.value = false;
+  }
+}
+
+async function saveViewXml(xml: string): Promise<void> {
+  const name = activeView.value;
+  editorBusy.value = true;
+  errorMessage.value = "";
+  try {
+    await jenkinsApi.saveView(name, xml);
+    viewEditor.value = null;
+    showNotice(t("viewUpdated"));
+    await loadViews();
+    await loadJobs("");
+  } catch (error) {
+    setError(error);
+  } finally {
+    editorBusy.value = false;
+  }
+}
+
+function openDeleteJob(): void {
+  if (!selectedJob.value || !guardWrite()) return;
+  deleteTarget.value = {
+    kind: "job",
+    name: selectedJob.value.name,
+    fullName: selectedJob.value.fullName,
+  };
+}
+
+function openDeleteView(): void {
+  if (!canManageView.value || !guardWrite()) return;
+  deleteTarget.value = { kind: "view", name: activeView.value };
+}
+
+async function confirmDelete(): Promise<void> {
+  if (!deleteTarget.value) return;
+  const target = deleteTarget.value;
+  editorBusy.value = true;
+  errorMessage.value = "";
+  try {
+    if (target.kind === "job") {
+      await jenkinsApi.deleteJob(target.fullName ?? target.name);
+      showNotice(t("jobDeleted"));
+      deleteTarget.value = null;
+      selectedJob.value = null;
+      builds.value = [];
+      selectedBuild.value = null;
+      stageMatrix.value = null;
+      await loadJobs(folder.value);
+    } else {
+      await jenkinsApi.deleteView(target.name);
+      showNotice(t("viewDeleted"));
+      deleteTarget.value = null;
+      await loadViews();
+      await loadJobs("");
+    }
+  } catch (error) {
+    setError(error);
+  } finally {
+    editorBusy.value = false;
+  }
+}
+
+async function refreshCurrent(): Promise<void> {
+  if (view.value === "build") {
+    await refreshBuild();
+  } else if (view.value === "stages") {
+    refreshStages();
+  } else if (view.value === "overview") {
+    await loadOverview();
+  } else if (view.value === "queue") {
+    await loadQueue();
+  } else if (view.value === "nodes") {
+    await loadNodes();
+  } else {
+    await refreshJob();
+  }
+}
+
+function applyTheme(): void {
+  const plugin = window.dbxPlugin;
+  if (!plugin) return;
+  const theme = plugin.theme;
+  if (theme?.appearance) {
+    document.documentElement.dataset.theme = theme.appearance;
+  }
+  for (const [key, value] of Object.entries(theme?.tokens ?? {})) {
+    if (/^--(color|radius|font)-/.test(key)) {
+      document.documentElement.style.setProperty(key, value);
+    }
+  }
+}
+
+function handleEnv(): void {
+  syncLocale(window.dbxPlugin?.locale);
+  applyTheme();
+}
+
+onMounted(async () => {
+  const plugin = window.dbxPlugin;
+  if (!plugin) {
+    errorMessage.value = "window.dbxPlugin is undefined";
+    return;
+  }
+  await plugin.ready;
+  setConnectionId(plugin.context?.connectionId);
+  connectionName.value = String(plugin.context?.connectionName ?? plugin.context?.name ?? "");
+  syncLocale(plugin.locale);
+  applyTheme();
+  window.addEventListener("dbx-plugin-env", handleEnv);
+  await loadIdentity();
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("dbx-plugin-env", handleEnv);
+  if (noticeTimer) window.clearTimeout(noticeTimer);
+});
+</script>
+
+<template>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <img class="logo" :src="logoUrl" alt="" />
+        <div class="brand-text">
+          <strong>{{ t("appTitle") }}</strong>
+          <span class="subtle" :title="connectionName">{{ connectionLabel }}</span>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <span v-if="identity" class="who">
+          {{ identity.name || t("anonymous") }}
+          <template v-if="identity.version"> · {{ identity.version }}</template>
+        </span>
+        <span class="chip" :data-write="!readOnly">
+          {{ readOnly ? t("readOnlyBadge") : t("writeBadge") }}
+        </span>
+        <button type="button" class="refresh" @click="refreshCurrent">{{ t("refresh") }}</button>
+      </div>
+    </header>
+
+    <div class="body">
+      <nav class="sidebar">
+        <button
+          type="button"
+          class="nav-item"
+          :class="{ active: view === 'overview' }"
+          @click="switchView('overview')"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H3zM9 9h4v4H9z" fill="none" stroke="currentColor" stroke-width="1.3" />
+          </svg>
+          <span>{{ t("overview") }}</span>
+        </button>
+        <button
+          type="button"
+          class="nav-item"
+          :class="{ active: view === 'jobs' || view === 'build' || view === 'stages' }"
+          @click="switchView('jobs')"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M3 4h10M3 8h10M3 12h6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+          </svg>
+          <span>{{ t("jobs") }}</span>
+        </button>
+        <button
+          type="button"
+          class="nav-item"
+          :class="{ active: view === 'queue' }"
+          @click="switchView('queue')"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+          </svg>
+          <span>{{ t("queue") }}</span>
+        </button>
+        <button
+          type="button"
+          class="nav-item"
+          :class="{ active: view === 'nodes' }"
+          @click="switchView('nodes')"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 2v4M8 10v4M4 8H2M14 8h-2M8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z" fill="none" stroke="currentColor" stroke-width="1.3" />
+          </svg>
+          <span>{{ t("nodes") }}</span>
+        </button>
+      </nav>
+
+      <div class="workspace">
+        <div v-if="errorMessage" class="banner error">
+          <span>{{ errorMessage }}</span>
+          <button type="button" @click="loadIdentity">{{ t("retry") }}</button>
+        </div>
+        <div v-if="notice" class="banner notice">{{ notice }}</div>
+
+        <OverviewView
+          v-if="view === 'overview'"
+          :overview="overview"
+          :loading="loadingView"
+          @refresh="loadOverview"
+        />
+
+        <QueueView
+          v-else-if="view === 'queue'"
+          :items="queueItems"
+          :loading="loadingView"
+          :read-only="readOnly"
+          :locale="locale"
+          @cancel="cancelQueueItem"
+          @refresh="loadQueue"
+        />
+
+        <NodesView
+          v-else-if="view === 'nodes'"
+          :nodes="nodes"
+          :loading="loadingView"
+          @refresh="loadNodes"
+        />
+
+        <StageView
+          v-else-if="view === 'stages' && selectedJob"
+          :job="selectedJob.fullName"
+          :matrix="stageMatrix"
+          :loading="loadingStages"
+          :locale="locale"
+          @back="view = 'jobs'"
+          @refresh="refreshStages"
+          @open-build="openBuild"
+        />
+
+        <div v-else-if="view === 'build' && selectedBuild && selectedJob" class="build-wrap">
+          <BuildView
+            :build="selectedBuild"
+            :job-full-name="selectedJob.fullName"
+            :read-only="readOnly"
+            :locale="locale"
+            @back="closeBuild"
+            @stop="stopBuild"
+          />
+        </div>
+
+        <div v-else class="jobs-wrap">
+          <JobList
+            :jobs="jobs"
+            :selected="selectedJob?.fullName ?? ''"
+            :folder="folder"
+            :loading="loadingJobs"
+            :views="views"
+            :active-view="activeView"
+            :read-only="readOnly"
+            @select="selectJob"
+            @open-folder="loadJobs($event.fullName)"
+            @navigate="loadJobs"
+            @select-view="activateView"
+            @refresh="loadJobs(folder)"
+            @create-job="openCreateJob"
+            @create-view="openCreateView"
+            @edit-view="openEditView"
+            @delete-view="openDeleteView"
+          />
+
+          <JobView
+            v-if="selectedJob"
+            :job="selectedJob"
+            :builds="builds"
+            :loading-builds="loadingJob || loadingBuilds"
+            :read-only="readOnly"
+            :is-pipeline="isPipeline"
+            :locale="locale"
+            @build="triggerBuild()"
+            @build-with-params="showParams = true"
+            @stop="stopLastBuild"
+            @open-build="openBuild"
+            @open-stages="openStages"
+            @refresh="refreshJob"
+            @edit-job="openEditJob"
+            @delete-job="openDeleteJob"
+          />
+          <div v-else class="placeholder">
+            <p>{{ t("selectJob") }}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <ParamDialog
+      v-if="showParams && selectedJob"
+      :job="selectedJob"
+      @submit="submitParams"
+      @cancel="showParams = false"
+    />
+
+    <JobEditor
+      v-if="jobEditor"
+      :mode="jobEditor.mode"
+      :folder="folder"
+      :config="jobEditor.mode === 'edit' ? jobEditor.config : null"
+      :job="selectedJob"
+      :busy="editorBusy"
+      @create="createJob"
+      @update="updateJob"
+      @save-xml="saveJobXml"
+      @cancel="jobEditor = null"
+    />
+
+    <ViewEditor
+      v-if="viewEditor"
+      :mode="viewEditor.mode"
+      :view="viewEditor.mode === 'edit' ? viewEditor.view : null"
+      :config="viewEditor.mode === 'edit' ? viewEditor.config : null"
+      :available-jobs="viewJobPool"
+      :busy="editorBusy"
+      @create="createView"
+      @update="updateView"
+      @save-xml="saveViewXml"
+      @cancel="viewEditor = null"
+    />
+
+    <ConfirmDelete
+      v-if="deleteTarget"
+      :target="deleteTarget.name"
+      :kind="deleteTarget.kind"
+      :full-name="deleteTarget.fullName"
+      :busy="editorBusy"
+      @confirm="confirmDelete"
+      @cancel="deleteTarget = null"
+    />
+  </div>
+</template>
+
+<style scoped>
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 56px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.brand-text strong {
+  font-size: 14px;
+}
+
+.subtle {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.who {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chip[data-write="true"] {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+
+.refresh {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 11px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.refresh:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.sidebar {
+  width: 196px;
+  flex: none;
+  padding: 12px;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+}
+
+.nav-item svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.nav-item:disabled {
+  opacity: 0.72;
+  cursor: default;
+}
+
+.soon {
+  margin-left: auto;
+  font-size: 9px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--panel-soft);
+  color: var(--muted);
+}
+
+.workspace {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  font-size: 12px;
+  flex: none;
+}
+
+.banner.error {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.banner.notice {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+
+.banner button {
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+.jobs-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.build-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.placeholder {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+</style>
