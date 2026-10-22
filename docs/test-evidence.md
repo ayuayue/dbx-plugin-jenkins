@@ -48,6 +48,12 @@
 | CRUD-E1 | 真实 Jenkins 2.586 CRUD E2E | `node scripts/e2e-jenkins.js` | — | 视图建/改/删 + 任务建/改/禁用/重命名/删 + 只读 3 项拦截全部通过；Pipeline 创建因实例缺 workflow 插件跳过 |
 | CRUD-E2 | HTML 错误页摘要 | `go test ./internal/jenkins/ -run TestAPIError` | — | 2 PASS |
 | UI3 | Pipeline / XML 编辑器：语法高亮 + 行号 + 当前行 + 展开全屏 + Tab 缩进 | `pnpm test` + Chrome CDP 像素校验 | 2 suite FAIL（`./highlight`、`./editor` 模块缺失） | 82 PASS（全量）；行高 18.6 / 内距 10 两侧一致、高亮层与 textarea `scrollHeight` 均为 392、展开 900×760 突破 modal `overflow:hidden`、Esc 先收编辑器再关弹窗、Tab 首行 `pipeline` → `  pipeline`（caret 2） |
+| AR1 | 自动刷新判定 + 串行轮询器 | `npx vitest run src/lib/refresh.test.ts` | 1 suite FAIL（`./refresh` 模块缺失） | 20 PASS；全量 102 PASS（11 files） |
+| CH1 | 阶段矩阵变更集：`changeSet`/`changeSets` 合并去重、200 rune 截断、空数组序列化、`jenkins/builds` 契约不变 | `go test ./internal/jenkins/ -run "TestGetStageMatrix\|TestGetBuild"` | build failed（10 处未定义字段/常量） | 15 PASS；全量 141 PASS |
+| CH1b | Pipeline `changeSets`（复数）真机缺陷回归 | 同上 | 5 FAIL（tree 缺 `changeSets`、`commitCount=0`） | 15 PASS |
+| CH2 | 前端浮层纯函数：短哈希 / 首行摘要 / 视口定位与翻转 | `pnpm test` | 11 FAIL / 114 PASS（函数未定义） | 125 PASS（11 files） |
+| CH3 | 浮层视觉与交互：Teleport 不被裁切、贴边翻转、8 条滚动、hover/键盘/Esc/外部点击/详情跳转 | Chrome CDP + headless 截图 | — | `parent=BODY`、`clippedBy=null`、8 条 `listScrollable=true`、底部行翻转 `top=92`、点击详情 `openBuild=38`、Esc/外部点击均关闭 |
+| CH4 | 真实 Jenkins 2.586 Pipeline changelog：`jenkins/stages` 返回 `changes` | 临时 sidecar 探针（已删） | 修复前 `commitCount=0`、`changes=[]` | `commitCount=1`、`changes=[945f1594 / feat(export): 阶段视图变更浮层联调提交 / e2e]` |
 
 ## 关键红测样本
 
@@ -259,6 +265,119 @@ Tests       28 passed (28)
 
 修复：扫描前把声明里的 `1.1` 等长替换成 `1.0`，原文与偏移保持不变。
 
+### AR：自动刷新模块缺失
+
+```
+FAIL  src/lib/refresh.test.ts [ src/lib/refresh.test.ts ]
+Error: Failed to load url ./refresh (resolved id: ./refresh) in E:/DBX插件开发/Jenkins/src/lib/refresh.test.ts. Does the file exist?
+ Test Files  1 failed | 10 passed (11)
+      Tests  82 passed (82)
+```
+
+实现 `src/lib/refresh.ts` 后 20 PASS，全量 102 PASS（11 files）。覆盖：
+
+- `hasRunningBuild`：空数组 / `null` / 全部结束 / `building: true` / `status: "building"`；
+- `hasRunningStage`：空矩阵 / 全部结束 / 构建 `building` / stage `IN_PROGRESS`、`in_progress`、`BUILDING` / `stages: null`；
+- `createAutoRefresher`：未到间隔不执行、到点执行并续排、上一轮未完成不重入、`stop()` 终止、重复 `start()` 幂等、`stop()` 后可重新 `start()`、`shouldContinue` 返回 false 自动停、任务抛错后继续、`restart()` 重置计时、未启动时 `restart()` 为空操作；
+- 常量：构建列表 3000ms、阶段视图 5000ms。
+
+### AS：触发构建后不主动刷新
+
+红（只加了测试，未实现）：
+
+```
+ ❯ src/lib/refresh.test.ts (0 test)
+ FAIL  src/lib/refresh.test.ts [ src/lib/refresh.test.ts ]
+TypeError: createPendingBuild is not a function
+ ❯ src/lib/refresh.test.ts:320:19
+ Test Files  1 failed | 10 passed (11)
+      Tests  82 passed (82)
+```
+
+绿（实现 `hasNewBuild` / `createPendingBuild` / `evaluatePendingBuild` + `App.vue` 接线）：
+
+```
+ ✓ src/lib/refresh.test.ts (32 tests)
+ Test Files  11 passed (11)
+      Tests  114 passed (114)
+```
+
+`pnpm build`：`[check-version] ok: 0.3.0` → `vue-tsc --noEmit` 无错误 → `ui/index.html 191.48 kB`。
+
+新增覆盖：
+
+- `hasNewBuild`：空 / `null` / `undefined`；只有触发前的编号 → false；出现更大编号 → true；首次构建（`previousNumber = 0`）→ true；上一个构建仍在 `building` 但编号未涨 → false（避免误判提前停止跟踪）；
+- `createPendingBuild`：绑定任务名、触发前编号与 `deadline = now + 120000`；省略 `now` 时以当前时间为准；
+- `evaluatePendingBuild`：任务切换 → `stale`；出现新构建 → `settled`；`settled` 优先于 `expired`；超时无新构建 → `expired`；未到期 → `watching`；
+- 接线（`App.vue`）：`pendingBuild` 并入 `autoRefreshMode` 的 `builds` 分支（不新建定时器）；触发成功后立即静默补刷 + 800ms 再补一次；`pollBuilds`/`selectJob` 命中 settled / expired / stale 即清空跟踪；切视图、卸载时清空。
+
+## 视图改名（2026-10-22）
+
+方案与接口实测见 [`docs/plan-view-rename.md`](./plan-view-rename.md)。
+
+红（stub 阶段，6 例后端 + 2 例前端）：
+
+```
+--- FAIL: TestRenameViewPostsFullForm (0.00s)
+    update_test.go:375: form name = "", want Builds2
+    update_test.go:378: form item_demo = "", want on
+    update_test.go:396: restore path = "", want /view/Builds2/config.xml
+--- FAIL: TestRenameViewIncludesRegexInForm (0.00s)
+    update_test.go:430: useincluderegex missing: Jenkins would drop includeRegex
+--- FAIL: TestRenameViewRejectsDuplicateName (0.00s)
+    update_test.go:458: error = <nil>, want invalid_config
+--- FAIL: TestRenameViewRejectsNonListView (0.00s)
+    update_test.go:489: error = <nil>, want invalid_config
+--- FAIL: TestUpdateViewRenamesThenPatchesNewPath (0.00s)
+    update_test.go:542: UpdateView() error = 404 page not found (HTTP 404)
+--- FAIL: TestUpdateViewRenameOnlyWritesOnce (0.00s)
+    update_test.go:588: UpdateView() error = 404 page not found (HTTP 404)
+
+FAIL  src/lib/forms.test.ts > buildViewUpdateFields > detects a renamed view
+AssertionError: expected {} to deeply equal { name: 'Builds 2' }
+FAIL  src/lib/forms.test.ts > buildViewUpdateFields > trims the new name before comparing
+```
+
+RPC 层红（mock 缺 `/api/json` 与 `configSubmit`）：
+
+```
+--- FAIL: TestRPCUpdateViewRename (0.00s)
+    config_rpc_test.go:393: updateView error = not_found: 404 page not found
+```
+
+绿：
+
+```
+ok  github.com/nixing178/dbx-plugin-jenkins/internal/jenkins  1.471s
+ok  github.com/nixing178/dbx-plugin-jenkins/internal/rpc      0.793s
+
+ Test Files  11 passed (11)
+      Tests  129 passed (129)
+
+pnpm typecheck: 通过
+pnpm build: [check-version] ok: 0.4.0 → ui/index.html 201.06 kB
+```
+
+真实 Jenkins 2.586 E2E：
+
+```
+CRUD view updated: "updated by dbx" demo,param-demo
+CRUD view renamed: CRUD-View-Renamed "updated by dbx" demo,param-demo
+CRUD cleanup ok
+E2E OK
+```
+
+> 改名后描述（`updated by dbx`）与任务清单（`demo,param-demo`）都保留，说明 configSubmit 的完整表单 + XML 回写生效。
+
+新增覆盖：
+
+- `RenameView`：表单必含 `name`、`json`（description/recurse/filterQueue/filterExecutors/columns）与每个任务的 `item_<job>`；有正则时补 `useincluderegex` + `includeRegex`；改名后用原 XML 回写新路径；
+- 重名（区分大小写）不发任何写请求，返回 `invalid_config`；
+- 非 ListView（AllView）拒绝改名，返回 `invalid_config: view is not a ListView`；
+- `UpdateView`：先改名再读新路径 XML 做局部改写，返回最终名称；只改名时只写一次 XML；同名视为 no-op；
+- RPC `jenkins/updateView` 返回 `fullName`；
+- 前端 `buildViewUpdateFields` 比对 trim 后的名称，空名等于不修改。
+
 ## 覆盖点
 
 - `BaseURL`：scheme/host/port 校验、base_path 归一化、IPv6、非法输入。
@@ -274,7 +393,7 @@ Tests       28 passed (28)
 - `Nodes`：在线/离线、执行器 busy/total、标签、离线原因。
 - `Overview`：whoami + mode + queue + nodes 聚合、执行器/节点统计。
 - `MCP`：10 个工具定义与 schema、只读连接隐藏 3 个写工具、注解（readOnly/destructive/idempotent）、`mcp/call` 路由、生命周期兜底建连、工具级错误（`isError`）、控制台日志两段返回（正文 + nextStart/moreData）。
-- `Views`：`GetViews`、`GetViewJobs`（视图名 URL 转义）、视图内文件夹/任务归一化与排序；RPC folder 优先于 view；MCP `list_jobs` 支持 view；前端 `groupJobs` 拆分与视图 Tab。
-- `Stages`：`wfapi/describe` 解析、矩阵列顺序、缺失 stage 留空、平均耗时（失败/进行中排除）、提交数、404 → `stages_unavailable`、部分构建无阶段时降级。
+- `Views`：`GetViews`、`GetViewJobs`（视图名 URL 转义）、视图内文件夹/任务归一化与排序；RPC folder 优先于 view；MCP `list_jobs` 支持 view；前端 `groupJobs` 拆分与视图 Tab；视图改名（configSubmit 完整表单 + XML 回写、查重、非 ListView 拒绝）。
+- `Stages`：`wfapi/describe` 解析、矩阵列顺序、缺失 stage 留空、平均耗时（失败/进行中排除）、提交数、404 → `stages_unavailable`、部分构建无阶段时降级；变更集同时解析 `changeSet`（Freestyle）与 `changeSets`（Pipeline），按 commitId 去重，矩阵内单条信息截断 200 rune。
 - `CRUD`：名称校验（路径分隔符/`..`/控制字符/255 上限）；任务 config.xml 路径；自由风格与 Pipeline 最小模板（脚本转义）；文件夹内创建；`doRename`；`doDelete`；ListView `createView`（name/mode 在 form 与 json 各一份、7 列默认配置）；视图 config.xml 读写；9 个写入口只读拦截；XML 保守改写保留 SCM/构建步骤/comparator/columns；增量更新只提交变化字段；HTML 错误页摘要。
 - 前端：错误码 → 中英文提示、未知错误码保留 detail；状态色调、时长/时间格式、日志尾部截断、匹配计数、大小写高亮；表单名称校验、载荷裁剪、差异字段、任务列表集合比较、删除确认精确匹配。

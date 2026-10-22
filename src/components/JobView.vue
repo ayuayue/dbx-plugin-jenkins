@@ -12,6 +12,7 @@ const props = defineProps<{
   readOnly: boolean;
   isPipeline: boolean;
   locale: "zh" | "en";
+  autoRefreshing: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -138,7 +139,13 @@ function triggerBuild(): void {
     <section class="panel">
       <div class="panel-head">
         <h2>{{ t("builds") }}</h2>
-        <span class="count">{{ builds.length }}</span>
+        <span class="panel-meta">
+          <span v-if="autoRefreshing" class="auto-refresh">
+            <span class="pulse" />
+            {{ t("autoRefreshing") }}
+          </span>
+          <span class="count">{{ builds.length }}</span>
+        </span>
       </div>
       <p v-if="loadingBuilds" class="empty">{{ t("loading") }}</p>
       <p v-else-if="!builds.length" class="empty">{{ t("noBuilds") }}</p>
@@ -386,6 +393,41 @@ h2 {
 .count {
   color: var(--muted);
   font-size: 12px;
+}
+
+.panel-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.auto-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--success);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: auto-refresh-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes auto-refresh-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .empty {

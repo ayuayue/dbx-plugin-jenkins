@@ -2,12 +2,14 @@ package jenkins
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestGetBuildStages(t *testing.T) {
@@ -61,7 +63,7 @@ func TestGetStageMatrix(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/job/demo/api/json":
-			if !strings.Contains(r.URL.Query().Get("tree"), "changeSet[items[commitId]]") {
+			if !strings.Contains(r.URL.Query().Get("tree"), "changeSets[items[commitId,msg,author[fullName]]]") {
 				t.Errorf("tree missing changeSet: %s", r.URL.Query().Get("tree"))
 			}
 			fmt.Fprint(w, `{"builds":[
@@ -164,6 +166,195 @@ func TestGetStageMatrixAllUnavailable(t *testing.T) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.Kind != ErrStagesUnavailable {
 		t.Fatalf("error = %v, want stages_unavailable", err)
+	}
+}
+
+func TestGetStageMatrixIncludesChanges(t *testing.T) {
+	var tree string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/job/demo/api/json" {
+			tree = r.URL.Query().Get("tree")
+			fmt.Fprint(w, `{"builds":[
+				{"number":35,"result":"SUCCESS","building":false,"changeSet":{"items":[]}},
+				{"number":34,"result":"FAILURE","building":false,"changeSet":{"items":[
+					{"commitId":"402ed1d7c9a1","msg":"fix(export): 修正导出任务数据源读写路由注解","author":{"fullName":"源哥"}},
+					{"commitId":"99887766aabb","msg":"chore: 调整模板","author":{"fullName":"Bob"}}
+				]}}
+			]}`)
+			return
+		}
+		fmt.Fprint(w, `{"stages":[{"name":"Build","status":"SUCCESS","durationMillis":100}]}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	matrix, err := client.GetStageMatrix(context.Background(), "demo", 10)
+	if err != nil {
+		t.Fatalf("GetStageMatrix() error = %v", err)
+	}
+	if !strings.Contains(tree, "changeSets[items[commitId,msg,author[fullName]]]") {
+		t.Fatalf("tree missing changeSets details: %s", tree)
+	}
+	if len(matrix.Builds) != 2 {
+		t.Fatalf("builds = %d, want 2", len(matrix.Builds))
+	}
+	changes := matrix.Builds[1].Changes
+	if len(changes) != 2 {
+		t.Fatalf("changes = %d, want 2", len(changes))
+	}
+	if changes[0].CommitID != "402ed1d7c9a1" || changes[0].Author != "源哥" {
+		t.Errorf("change 0 = %+v, want commit 402ed1d7c9a1 by 源哥", changes[0])
+	}
+	if changes[0].Message != "fix(export): 修正导出任务数据源读写路由注解" {
+		t.Errorf("message = %q", changes[0].Message)
+	}
+	if matrix.Builds[1].CommitCount != 2 {
+		t.Errorf("commit count = %d, want 2", matrix.Builds[1].CommitCount)
+	}
+	if len(matrix.Builds[0].Changes) != 0 {
+		t.Errorf("build 35 changes = %d, want 0", len(matrix.Builds[0].Changes))
+	}
+}
+
+func TestGetStageMatrixEmptyChangesIsArray(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/job/demo/api/json" {
+			fmt.Fprint(w, `{"builds":[{"number":7,"result":"SUCCESS","building":false,"changeSet":{"items":[]}}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"stages":[{"name":"Build","status":"SUCCESS","durationMillis":100}]}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	matrix, err := client.GetStageMatrix(context.Background(), "demo", 10)
+	if err != nil {
+		t.Fatalf("GetStageMatrix() error = %v", err)
+	}
+	if len(matrix.Builds) != 1 {
+		t.Fatalf("builds = %d, want 1", len(matrix.Builds))
+	}
+	if matrix.Builds[0].Changes == nil {
+		t.Fatalf("changes = nil, want empty slice")
+	}
+	if matrix.Builds[0].CommitCount != 0 {
+		t.Errorf("commit count = %d, want 0", matrix.Builds[0].CommitCount)
+	}
+
+	raw, err := json.Marshal(matrix.Builds[0])
+	if err != nil {
+		t.Fatalf("marshal build: %v", err)
+	}
+	if !strings.Contains(string(raw), `"changes":[]`) {
+		t.Errorf("json = %s, want changes to serialize as []", raw)
+	}
+}
+
+func TestGetStageMatrixTruncatesLongMessage(t *testing.T) {
+	longMessage := "  " + strings.Repeat("修", 500) + "\n\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/job/demo/api/json" {
+			payload := map[string]any{
+				"builds": []map[string]any{{
+					"number":    1,
+					"result":    "SUCCESS",
+					"building":  false,
+					"changeSet": map[string]any{"items": []map[string]any{{
+						"commitId": "abc123",
+						"msg":      longMessage,
+						"author":   map[string]any{"fullName": "源哥"},
+					}}},
+				}},
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				t.Errorf("marshal payload: %v", err)
+				return
+			}
+			_, _ = w.Write(body)
+			return
+		}
+		fmt.Fprint(w, `{"stages":[{"name":"Build","status":"SUCCESS","durationMillis":100}]}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	matrix, err := client.GetStageMatrix(context.Background(), "demo", 10)
+	if err != nil {
+		t.Fatalf("GetStageMatrix() error = %v", err)
+	}
+	if len(matrix.Builds) != 1 || len(matrix.Builds[0].Changes) != 1 {
+		t.Fatalf("matrix = %+v, want one build with one change", matrix.Builds)
+	}
+
+	message := matrix.Builds[0].Changes[0].Message
+	if !utf8.ValidString(message) {
+		t.Fatalf("message is not valid UTF-8: %q", message)
+	}
+	if got := utf8.RuneCountInString(message); got != maxChangeMessageRunes+1 {
+		t.Errorf("message length = %d runes, want %d", got, maxChangeMessageRunes+1)
+	}
+	if !strings.HasPrefix(message, "修") {
+		t.Errorf("message = %q, want leading whitespace trimmed", message)
+	}
+	if !strings.HasSuffix(message, "…") {
+		t.Errorf("message = %q, want ellipsis suffix", message)
+	}
+}
+
+func TestGetStageMatrixReadsChangeSets(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/job/demo/api/json" {
+			// Pipeline 构建的 changelog 只在 changeSets（复数），changeSet 为空。
+			fmt.Fprint(w, `{"builds":[{"number":2,"result":"SUCCESS","building":false,"changeSets":[{"items":[
+				{"commitId":"945f1594aa","msg":"feat(export): 阶段视图变更浮层联调提交","author":{"fullName":"源哥"}}
+			]}]}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"stages":[{"name":"Checkout","status":"SUCCESS","durationMillis":100}]}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	matrix, err := client.GetStageMatrix(context.Background(), "demo", 5)
+	if err != nil {
+		t.Fatalf("GetStageMatrix() error = %v", err)
+	}
+	if len(matrix.Builds) != 1 {
+		t.Fatalf("builds = %d, want 1", len(matrix.Builds))
+	}
+	build := matrix.Builds[0]
+	if build.CommitCount != 1 || len(build.Changes) != 1 {
+		t.Fatalf("commitCount = %d, changes = %d, want 1/1", build.CommitCount, len(build.Changes))
+	}
+	if build.Changes[0].CommitID != "945f1594aa" || build.Changes[0].Author != "源哥" {
+		t.Errorf("change = %+v", build.Changes[0])
+	}
+}
+
+func TestGetStageMatrixDeduplicatesChangeSets(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/job/demo/api/json" {
+			// 某些版本会把同一个 ChangeLogSet 同时暴露在单数与复数属性上。
+			fmt.Fprint(w, `{"builds":[{"number":3,"result":"SUCCESS","building":false,
+				"changeSet":{"items":[{"commitId":"abc123","msg":"fix: 去重","author":{"fullName":"源哥"}}]},
+				"changeSets":[{"items":[{"commitId":"abc123","msg":"fix: 去重","author":{"fullName":"源哥"}}]}]}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"stages":[{"name":"Build","status":"SUCCESS","durationMillis":100}]}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	matrix, err := client.GetStageMatrix(context.Background(), "demo", 5)
+	if err != nil {
+		t.Fatalf("GetStageMatrix() error = %v", err)
+	}
+	if got := len(matrix.Builds[0].Changes); got != 1 {
+		t.Fatalf("changes = %d, want deduplicated 1", got)
+	}
+	if matrix.Builds[0].CommitCount != 1 {
+		t.Errorf("commitCount = %d, want 1", matrix.Builds[0].CommitCount)
 	}
 }
 

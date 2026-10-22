@@ -114,6 +114,15 @@ func fakeJenkinsConfig(t *testing.T) (*httptest.Server, *configCapture) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/view/Builds/config.xml", configHandler(rpcListViewConfig))
+	mux.HandleFunc("/view/Builds/configSubmit", func(w http.ResponseWriter, r *http.Request) {
+		capture.record(r)
+		w.WriteHeader(http.StatusFound)
+	})
+	mux.HandleFunc("/view/Builds2/config.xml", configHandler(rpcListViewConfig))
+	mux.HandleFunc("/api/json", func(w http.ResponseWriter, r *http.Request) {
+		capture.record(r)
+		fmt.Fprint(w, `{"views":[{"name":"Builds"},{"name":"Ops"}]}`)
+	})
 	mux.HandleFunc("/view/Builds/doDelete", func(w http.ResponseWriter, r *http.Request) {
 		capture.record(r)
 		w.WriteHeader(http.StatusOK)
@@ -376,6 +385,52 @@ func TestRPCCreateView(t *testing.T) {
 	}
 	if !strings.Contains(body, "json=") {
 		t.Errorf("json missing: %q", body)
+	}
+}
+
+func TestRPCUpdateViewRename(t *testing.T) {
+	server, capture := fakeJenkinsConfig(t)
+	defer server.Close()
+	service := connectM2(t, server, false)
+
+	result, rpcErr := service.Handle(
+		context.Background(),
+		"jenkins/updateView",
+		json.RawMessage(`{"connectionId":"conn-1","view":"Builds","fields":{"name":"Builds2"}}`),
+	)
+	if rpcErr != nil {
+		t.Fatalf("updateView error = %+v", rpcErr)
+	}
+	payload := decodeResult[struct {
+		Success  bool   `json:"success"`
+		FullName string `json:"fullName"`
+	}](t, result)
+	if !payload.Success || payload.FullName != "Builds2" {
+		t.Errorf("result = %+v", payload)
+	}
+	if !capture.contains("/view/Builds/configSubmit") {
+		t.Errorf("configSubmit not called: %+v", capture.requests)
+	}
+	if !capture.contains("POST /view/Builds2/config.xml") {
+		t.Errorf("config not restored on the new view: %+v", capture.requests)
+	}
+}
+
+func TestRPCUpdateViewRejectsDuplicateName(t *testing.T) {
+	server, capture := fakeJenkinsConfig(t)
+	defer server.Close()
+	service := connectM2(t, server, false)
+
+	_, rpcErr := service.Handle(
+		context.Background(),
+		"jenkins/updateView",
+		json.RawMessage(`{"connectionId":"conn-1","view":"Builds","fields":{"name":"Builds"}}`),
+	)
+	if rpcErr != nil {
+		t.Fatalf("same-name update should be a no-op, got %+v", rpcErr)
+	}
+	if capture.contains("/configSubmit") {
+		t.Errorf("configSubmit should not be called for a same-name update: %+v", capture.requests)
 	}
 }
 

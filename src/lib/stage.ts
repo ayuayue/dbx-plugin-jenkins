@@ -36,3 +36,66 @@ export function stageIntensity(ms: number, max: number): number {
   }
   return 0.1 + 0.35 * Math.min(1, ms / max);
 }
+
+export interface AnchorRect {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
+
+export interface PopoverSize {
+  width: number;
+  height: number;
+}
+
+export interface ViewportSize {
+  width: number;
+  height: number;
+}
+
+const POPOVER_GAP = 8;
+
+/** 提交哈希短号：取前 8 位，空值显示破折号。 */
+export function shortCommitId(id: string, length = 8): string {
+  const trimmed = (id ?? "").trim();
+  if (!trimmed) return "—";
+  return trimmed.slice(0, Math.max(1, length));
+}
+
+/** 提交信息摘要：取首个非空行、压缩空白，超长按码点截断并补省略号。 */
+export function commitMessageSummary(message: string, max = 120): string {
+  const firstLine =
+    (message ?? "")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .find((line) => line.length > 0) ?? "";
+
+  const chars = Array.from(firstLine);
+  if (chars.length <= max) return firstLine;
+  return chars.slice(0, max).join("") + "…";
+}
+
+/** 浮层定位：优先贴在触发区右侧，越界时左翻/上移，最后钳制在视口内。 */
+export function popoverPosition(
+  anchor: AnchorRect,
+  size: PopoverSize,
+  viewport: ViewportSize,
+  gap = POPOVER_GAP,
+): { top: number; left: number } {
+  const maxLeft = viewport.width - size.width - gap;
+  const maxTop = viewport.height - size.height - gap;
+
+  let left = anchor.left + anchor.width + gap;
+  if (left > maxLeft) {
+    const flipped = anchor.left - size.width - gap;
+    left = flipped >= gap ? flipped : Math.max(gap, maxLeft);
+  }
+  left = Math.min(Math.max(left, gap), Math.max(gap, maxLeft));
+
+  let top = anchor.top;
+  if (top > maxTop) top = maxTop;
+  top = Math.min(Math.max(top, gap), Math.max(gap, maxTop));
+
+  return { top, left };
+}

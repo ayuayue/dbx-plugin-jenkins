@@ -2,6 +2,7 @@ package jenkins
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -43,6 +44,69 @@ func TestGetBuilds(t *testing.T) {
 	}
 	if builds[1].Status != StatusBuilding {
 		t.Errorf("build 11 status = %q, want building", builds[1].Status)
+	}
+}
+
+func TestGetBuildsKeepsChangesInternal(t *testing.T) {
+	var tree string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tree = r.URL.Query().Get("tree")
+		fmt.Fprint(w, `{"builds":[{"number":7,"result":"SUCCESS","building":false,"changeSet":{"items":[
+			{"commitId":"a1","msg":"feat: 第一处","author":{"fullName":"Alice"}},
+			{"commitId":"b2","msg":"fix: 第二处","author":{"fullName":"Bob"}}
+		]}}]}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	builds, err := client.GetBuilds(context.Background(), "demo", 5)
+	if err != nil {
+		t.Fatalf("GetBuilds() error = %v", err)
+	}
+	if !strings.Contains(tree, "changeSets[items[commitId,msg,author[fullName]]]") {
+		t.Fatalf("tree missing changeSets details: %s", tree)
+	}
+	if len(builds) != 1 || builds[0].CommitCount != 2 {
+		t.Fatalf("builds = %+v, want commitCount 2", builds)
+	}
+	if len(builds[0].Changes) != 2 || builds[0].Changes[1].Message != "fix: 第二处" {
+		t.Errorf("changes = %+v, want two parsed entries", builds[0].Changes)
+	}
+
+	raw, err := json.Marshal(builds[0])
+	if err != nil {
+		t.Fatalf("marshal build: %v", err)
+	}
+	if strings.Contains(string(raw), `"changes"`) {
+		t.Errorf("json = %s, want changes kept internal for jenkins/builds", raw)
+	}
+}
+
+func TestGetBuildDetailReadsChangeSets(t *testing.T) {
+	var tree string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tree = r.URL.Query().Get("tree")
+		// Pipeline 构建详情：changelog 在 changeSets（复数）。
+		fmt.Fprint(w, `{
+			"number":2,"result":"SUCCESS","building":false,
+			"changeSets":[{"items":[{"commitId":"945f1594aa","msg":"feat(export): 联调","author":{"fullName":"源哥"}}]}]
+		}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	build, err := client.GetBuild(context.Background(), "demo", 2)
+	if err != nil {
+		t.Fatalf("GetBuild() error = %v", err)
+	}
+	if !strings.Contains(tree, "changeSets[items[commitId,msg,author[fullName]]]") {
+		t.Fatalf("tree missing changeSets details: %s", tree)
+	}
+	if len(build.ChangeSet) != 1 {
+		t.Fatalf("changeSet = %d, want 1", len(build.ChangeSet))
+	}
+	if build.ChangeSet[0].CommitID != "945f1594aa" || build.ChangeSet[0].Author != "源哥" {
+		t.Errorf("change = %+v", build.ChangeSet[0])
 	}
 }
 

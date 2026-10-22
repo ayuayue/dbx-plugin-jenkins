@@ -102,6 +102,7 @@ export function buildJobUpdateFields(
 }
 
 export interface ViewFormValues {
+  name: string;
   description: string;
   jobNames: string[];
   includeRegex: string;
@@ -109,6 +110,7 @@ export interface ViewFormValues {
 }
 
 export interface ViewUpdateFields {
+  name?: string;
   description?: string;
   jobNames?: string[];
   includeRegex?: string;
@@ -120,6 +122,9 @@ export function buildViewUpdateFields(
   original: ViewFormValues,
 ): ViewUpdateFields {
   const fields: ViewUpdateFields = {};
+  const name = (current.name ?? "").trim();
+  // 空名表示「不修改」；同名不发请求，Jenkins 那边也是 noop。
+  if (name && name !== original.name.trim()) fields.name = name;
   if (current.description !== original.description) {
     fields.description = current.description;
   }

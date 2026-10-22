@@ -115,6 +115,7 @@ export interface StageBuildInfo {
   timestamp: number;
   duration: number;
   commitCount: number;
+  changes?: ChangeSetItem[] | null;
   stages: StageInfo[] | null;
 }
 
@@ -221,6 +222,7 @@ export interface JobUpdateFields {
 }
 
 export interface ViewUpdateFields {
+  name?: string;
   description?: string;
   jobNames?: string[];
   includeRegex?: string;

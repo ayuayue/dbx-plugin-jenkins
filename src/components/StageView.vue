@@ -1,8 +1,15 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { t } from "../i18n";
 import { formatTimestamp } from "../lib/format";
-import { formatStageDuration, stageIntensity, stageTone } from "../lib/stage";
+import {
+  commitMessageSummary,
+  formatStageDuration,
+  popoverPosition,
+  shortCommitId,
+  stageIntensity,
+  stageTone,
+} from "../lib/stage";
 import { statusMeta } from "../lib/status";
 import type { StageBuildInfo, StageInfo, StageMatrix } from "../types";
 
@@ -11,6 +18,7 @@ const props = defineProps<{
   matrix: StageMatrix | null;
   loading: boolean;
   locale: "zh" | "en";
+  autoRefreshing: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -18,6 +26,11 @@ const emit = defineEmits<{
   refresh: [];
   openBuild: [number: number];
 }>();
+
+const POPOVER_WIDTH = 360;
+const POPOVER_MAX_HEIGHT = 320;
+const POPOVER_GAP = 8;
+const CLOSE_DELAY_MS = 120;
 
 const stageNames = computed(() => props.matrix?.stageNames ?? []);
 
@@ -29,6 +42,14 @@ const maxDurations = computed(() =>
     }, 0),
   ),
 );
+
+const popoverBuild = ref<StageBuildInfo | null>(null);
+const popoverEl = ref<HTMLElement | null>(null);
+const popoverStyle = ref<Record<string, string>>({ top: "0px", left: "0px" });
+
+let activeTrigger: HTMLElement | null = null;
+let closeTimer: number | undefined;
+let openedByClick = false;
 
 function stageOf(build: StageBuildInfo, name: string): StageInfo | undefined {
   return (build.stages ?? []).find((stage) => stage.name === name);
@@ -56,6 +77,124 @@ function cellTitle(name: string, build: StageBuildInfo): string {
   if (!stage) return `${name}: skipped`;
   return `${name}: ${stage.status} ${formatStageDuration(stage.durationMillis)}`;
 }
+
+function clearClose(): void {
+  if (closeTimer !== undefined) {
+    window.clearTimeout(closeTimer);
+    closeTimer = undefined;
+  }
+}
+
+function detachPopoverListeners(): void {
+  window.removeEventListener("scroll", closePopover, true);
+  window.removeEventListener("resize", closePopover);
+  window.removeEventListener("keydown", onPopoverKeydown);
+  document.removeEventListener("click", onDocumentClick, true);
+}
+
+function closePopover(): void {
+  clearClose();
+  detachPopoverListeners();
+  popoverBuild.value = null;
+  activeTrigger = null;
+  openedByClick = false;
+}
+
+function onPopoverKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") closePopover();
+}
+
+function onDocumentClick(event: MouseEvent): void {
+  const target = event.target as Node | null;
+  if (!target) return;
+  if (popoverEl.value?.contains(target) || activeTrigger?.contains(target)) return;
+  closePopover();
+}
+
+function scheduleClose(): void {
+  clearClose();
+  closeTimer = window.setTimeout(() => closePopover(), CLOSE_DELAY_MS);
+}
+
+function positionPopover(trigger: HTMLElement): void {
+  const triggerRect = trigger.getBoundingClientRect();
+  const cellRect = trigger.closest("td")?.getBoundingClientRect();
+  const anchorLeft = cellRect ? cellRect.right : triggerRect.right;
+  const height = Math.min(popoverEl.value?.offsetHeight || POPOVER_MAX_HEIGHT, POPOVER_MAX_HEIGHT);
+  const position = popoverPosition(
+    { top: triggerRect.top, left: anchorLeft, width: 0, height: triggerRect.height },
+    { width: POPOVER_WIDTH, height },
+    { width: window.innerWidth, height: window.innerHeight },
+    POPOVER_GAP,
+  );
+  popoverStyle.value = { top: `${position.top}px`, left: `${position.left}px` };
+}
+
+async function openPopover(build: StageBuildInfo, event: Event, byClick = false): Promise<void> {
+  if (!build.changes?.length) return;
+  const trigger = (event.currentTarget as HTMLElement | null) ?? activeTrigger;
+  if (!trigger) return;
+
+  clearClose();
+  if (popoverBuild.value?.number !== build.number) {
+    popoverBuild.value = build;
+    activeTrigger = trigger;
+    openedByClick = false;
+    window.addEventListener("scroll", closePopover, true);
+    window.addEventListener("resize", closePopover);
+    window.addEventListener("keydown", onPopoverKeydown);
+    document.addEventListener("click", onDocumentClick, true);
+  }
+  if (byClick) openedByClick = true;
+
+  await nextTick();
+  positionPopover(trigger);
+}
+
+function handleTriggerClick(build: StageBuildInfo, event: MouseEvent): void {
+  if (popoverBuild.value?.number === build.number && openedByClick) {
+    closePopover();
+    return;
+  }
+  void openPopover(build, event, true);
+}
+
+function handleTriggerBlur(): void {
+  clearClose();
+  closeTimer = window.setTimeout(() => {
+    const active = document.activeElement as Node | null;
+    if (active && (popoverEl.value?.contains(active) || activeTrigger?.contains(active))) return;
+    closePopover();
+  }, CLOSE_DELAY_MS);
+}
+
+function onPopoverFocusOut(event: FocusEvent): void {
+  const next = event.relatedTarget as Node | null;
+  if (next && (popoverEl.value?.contains(next) || activeTrigger?.contains(next))) return;
+  closePopover();
+}
+
+function openBuildFromPopover(): void {
+  const build = popoverBuild.value;
+  closePopover();
+  if (build) emit("openBuild", build.number);
+}
+
+watch(
+  () => props.matrix,
+  (matrix) => {
+    const current = popoverBuild.value;
+    if (!current) return;
+    const fresh = matrix?.builds.find((build) => build.number === current.number);
+    if (fresh) {
+      popoverBuild.value = fresh;
+    } else {
+      closePopover();
+    }
+  },
+);
+
+onBeforeUnmount(() => closePopover());
 </script>
 
 <template>
@@ -74,9 +213,15 @@ function cellTitle(name: string, build: StageBuildInfo): string {
           {{ t("averageRun") }} ≈ {{ formatStageDuration(matrix.averageRun) }}
         </p>
       </div>
-      <button type="button" class="ghost" @click="emit('refresh')">
-        {{ t("refresh") }}
-      </button>
+      <div class="stage-actions">
+        <span v-if="autoRefreshing" class="auto-refresh">
+          <span class="pulse" />
+          {{ t("autoRefreshing") }}
+        </span>
+        <button type="button" class="ghost" @click="emit('refresh')">
+          {{ t("refresh") }}
+        </button>
+      </div>
     </header>
 
     <p v-if="loading" class="empty">{{ t("loading") }}</p>
@@ -117,7 +262,22 @@ function cellTitle(name: string, build: StageBuildInfo): string {
                 <strong>#{{ build.number }}</strong>
               </div>
               <span class="build-time">{{ formatTimestamp(build.timestamp, locale) }}</span>
-              <span class="build-commits">{{ commitLabel(build.commitCount) }}</span>
+              <button
+                v-if="build.changes?.length"
+                type="button"
+                class="commit-trigger"
+                :aria-expanded="popoverBuild?.number === build.number"
+                aria-haspopup="dialog"
+                :title="t('viewChangesHint')"
+                @mouseenter="openPopover(build, $event)"
+                @mouseleave="scheduleClose()"
+                @focus="openPopover(build, $event)"
+                @blur="handleTriggerBlur()"
+                @click.stop="handleTriggerClick(build, $event)"
+              >
+                {{ commitLabel(build.commitCount) }}
+              </button>
+              <span v-else class="build-commits">{{ commitLabel(build.commitCount) }}</span>
             </td>
             <td
               v-for="(name, index) in stageNames"
@@ -135,6 +295,38 @@ function cellTitle(name: string, build: StageBuildInfo): string {
         </tbody>
       </table>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="popoverBuild"
+        ref="popoverEl"
+        class="commit-pop"
+        role="dialog"
+        :aria-label="t('changes')"
+        :style="popoverStyle"
+        @mouseenter="clearClose()"
+        @mouseleave="scheduleClose()"
+        @focusout="onPopoverFocusOut"
+      >
+        <header class="commit-pop-head">
+          {{ commitLabel(popoverBuild.changes?.length ?? 0) }}
+        </header>
+        <ul class="commit-list">
+          <li v-for="item in popoverBuild.changes" :key="`${item.commitId}-${item.message}`">
+            <code class="commit-id">{{ shortCommitId(item.commitId) }}</code>
+            <div class="commit-body">
+              <span class="commit-message" :title="item.message">
+                {{ commitMessageSummary(item.message) || "—" }}
+              </span>
+              <span class="commit-author">{{ item.author || "—" }}</span>
+            </div>
+          </li>
+        </ul>
+        <button type="button" class="commit-detail" @click="openBuildFromPopover">
+          {{ t("seeDetailPage") }}
+        </button>
+      </div>
+    </Teleport>
   </section>
 </template>
 
@@ -192,6 +384,43 @@ h1 {
   margin: 5px 0 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+.stage-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+}
+
+.auto-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--success);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: stage-auto-refresh-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes stage-auto-refresh-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .ghost {
@@ -362,6 +591,28 @@ thead .row-head {
   font-size: 10px;
 }
 
+.commit-trigger {
+  display: block;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  text-align: left;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.commit-trigger:hover,
+.commit-trigger:focus-visible,
+.commit-trigger[aria-expanded="true"] {
+  color: var(--accent);
+  outline: none;
+}
+
 .stage-cell {
   min-width: 96px;
   height: 42px;
@@ -402,5 +653,98 @@ thead .row-head {
   to {
     background-position: 22px 0;
   }
+}
+
+.commit-pop {
+  position: fixed;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  max-height: 320px;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: 0 14px 36px rgb(15 23 42 / 0.18);
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+}
+
+.commit-pop-head {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.commit-list {
+  flex: 1;
+  min-height: 0;
+  margin: 8px 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.commit-list li {
+  display: flex;
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+}
+
+.commit-list li:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.commit-id {
+  flex: none;
+  align-self: flex-start;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.commit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.commit-message {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commit-author {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.commit-detail {
+  flex: none;
+  padding: 8px 0 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.commit-detail:hover {
+  text-decoration: underline;
 }
 </style>

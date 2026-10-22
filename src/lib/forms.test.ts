@@ -122,6 +122,7 @@ describe("buildJobUpdateFields", () => {
 
 describe("buildViewUpdateFields", () => {
   const original = {
+    name: "Builds",
     description: "old",
     jobNames: ["demo", "api"],
     includeRegex: "",
@@ -144,6 +145,28 @@ describe("buildViewUpdateFields", () => {
     expect(
       buildViewUpdateFields({ ...original, jobNames: ["demo", "api", "web"] }, original),
     ).toEqual({ jobNames: ["demo", "api", "web"] });
+  });
+
+  it("detects a renamed view", () => {
+    expect(
+      buildViewUpdateFields({ ...original, name: "Builds 2" }, original),
+    ).toEqual({ name: "Builds 2" });
+  });
+
+  it("trims the new name before comparing", () => {
+    expect(
+      buildViewUpdateFields({ ...original, name: "  Builds 2  " }, original),
+    ).toEqual({ name: "Builds 2" });
+  });
+
+  it("ignores whitespace-only differences", () => {
+    expect(
+      buildViewUpdateFields({ ...original, name: "  Builds " }, original),
+    ).toEqual({});
+  });
+
+  it("ignores an empty name (no rename)", () => {
+    expect(buildViewUpdateFields({ ...original, name: "   " }, original)).toEqual({});
   });
 });
 

@@ -19,6 +19,7 @@ const props = defineProps<{
   view?: ViewInfo | null;
   config?: ViewConfigResponse | null;
   availableJobs: string[];
+  existingNames?: string[];
   busy: boolean;
 }>();
 
@@ -30,7 +31,7 @@ const emit = defineEmits<{
 }>();
 
 const tab = ref<"form" | "xml">("form");
-const name = ref("");
+const name = ref(props.config?.fields?.name ?? props.view?.name ?? "");
 const description = ref(props.config?.fields?.description ?? "");
 const selected = ref<string[]>(props.config?.fields?.jobNames ?? []);
 const includeRegex = ref(props.config?.fields?.includeRegex ?? "");
@@ -43,6 +44,7 @@ const isEdit = computed(() => props.mode === "edit");
 const isListView = computed(() => !isEdit.value || Boolean(props.config?.fields));
 
 const original = computed(() => ({
+  name: props.config?.fields?.name ?? props.view?.name ?? "",
   description: props.config?.fields?.description ?? "",
   jobNames: props.config?.fields?.jobNames ?? [],
   includeRegex: props.config?.fields?.includeRegex ?? "",
@@ -106,6 +108,7 @@ function submit(): void {
 
   const fields = buildViewUpdateFields(
     {
+      name: name.value,
       description: description.value,
       jobNames: selected.value,
       includeRegex: includeRegex.value,
@@ -113,6 +116,18 @@ function submit(): void {
     },
     original.value,
   );
+  if (fields.name) {
+    const nameError = validateName(fields.name);
+    if (nameError) {
+      error.value = t(nameError);
+      return;
+    }
+    const taken = (props.existingNames ?? []).some((item) => item === fields.name);
+    if (taken) {
+      error.value = t("viewNameExists", { name: fields.name });
+      return;
+    }
+  }
   if (Object.keys(fields).length === 0) {
     emit("cancel");
     return;
@@ -166,6 +181,12 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
         </template>
 
         <template v-if="!isEdit || (tab === 'form' && isListView)">
+          <label v-if="isEdit" class="field">
+            <span class="label">{{ t("viewName") }}</span>
+            <input v-model="name" type="text" />
+            <span class="hint">{{ t("renameHint") }}</span>
+          </label>
+
           <label class="field">
             <span class="label">{{ t("description") }}</span>
             <textarea v-model="description" rows="2" />

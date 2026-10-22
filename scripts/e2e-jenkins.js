@@ -316,6 +316,40 @@ async function latestBuild(job) {
     throw new Error(`view update failed: ${JSON.stringify(updatedView.fields)}`);
   }
 
+  // 改名走 configSubmit（Jenkins 的 config.xml 不接受改名），
+  // 必须保证任务清单与描述不被全量提交冲掉。
+  const crudViewRenamed = `${crudView}-Renamed`;
+  const renameResult = await invoke("jenkins/updateView", {
+    connectionId: "e2e",
+    view: crudView,
+    fields: { name: crudViewRenamed },
+  });
+  if (renameResult.fullName !== crudViewRenamed) {
+    throw new Error(`view rename returned ${JSON.stringify(renameResult)}`);
+  }
+  const viewsAfterRename = await invoke("jenkins/views", { connectionId: "e2e" });
+  if (viewsAfterRename.views.some((view) => view.name === crudView)) {
+    throw new Error(`old view name ${crudView} still present after rename`);
+  }
+  const renamedView = await invoke("jenkins/viewConfig", {
+    connectionId: "e2e",
+    view: crudViewRenamed,
+  });
+  const renamedJobs = renamedView.fields?.jobNames ?? [];
+  console.log(
+    "CRUD view renamed:",
+    renamedView.fields?.name,
+    JSON.stringify(renamedView.fields?.description),
+    renamedJobs.join(","),
+  );
+  if (
+    !renamedView.fields ||
+    renamedView.fields.description !== "updated by dbx" ||
+    renamedJobs.length !== 2
+  ) {
+    throw new Error(`view rename lost config: ${JSON.stringify(renamedView.fields)}`);
+  }
+
   await invoke("jenkins/createJob", {
     connectionId: "e2e",
     name: "crud-free",
@@ -404,13 +438,13 @@ async function latestBuild(job) {
     await invoke("jenkins/deleteJob", { connectionId: "e2e", job: "crud-pipe" });
   }
   await invoke("jenkins/deleteJob", { connectionId: "e2e", job: "crud-free-renamed" });
-  await invoke("jenkins/deleteView", { connectionId: "e2e", view: crudView });
+  await invoke("jenkins/deleteView", { connectionId: "e2e", view: crudViewRenamed });
   const finalJobs = await invoke("jenkins/jobs", { connectionId: "e2e" });
   const finalViews = await invoke("jenkins/views", { connectionId: "e2e" });
   if (finalJobs.jobs.some((job) => job.name.startsWith("crud-"))) {
     throw new Error("CRUD jobs were not deleted");
   }
-  if (finalViews.views.some((view) => view.name === crudView)) {
+  if (finalViews.views.some((view) => view.name === crudView || view.name === crudViewRenamed)) {
     throw new Error("CRUD view was not deleted");
   }
   console.log("CRUD cleanup ok");

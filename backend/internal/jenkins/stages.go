@@ -116,6 +116,10 @@ func (c *Client) GetStageMatrix(ctx context.Context, job string, limit int) (*St
 	counts := make([]int, len(matrix.StageNames))
 
 	for index, build := range builds {
+		changes := build.Changes
+		if changes == nil {
+			changes = []ChangeSetItem{}
+		}
 		matrix.Builds = append(matrix.Builds, StageBuild{
 			Number:      build.Number,
 			Result:      build.Result,
@@ -123,6 +127,7 @@ func (c *Client) GetStageMatrix(ctx context.Context, job string, limit int) (*St
 			Timestamp:   build.Timestamp,
 			Duration:    build.Duration,
 			CommitCount: build.CommitCount,
+			Changes:     changes,
 			Stages:      stages[index],
 		})
 		for _, stage := range stages[index] {

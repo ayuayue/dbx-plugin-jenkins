@@ -425,10 +425,11 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 		if strings.TrimSpace(request.View) == "" {
 			return nil, invalidParams("missing view name")
 		}
-		if err := client.UpdateView(ctx, request.View, viewUpdate(request.Fields)); err != nil {
+		fullName, err := client.UpdateView(ctx, request.View, viewUpdate(request.Fields))
+		if err != nil {
 			return nil, mapError(err)
 		}
-		return map[string]any{"success": true}, nil
+		return map[string]any{"success": true, "fullName": fullName}, nil
 
 	case "jenkins/deleteView":
 		if strings.TrimSpace(request.View) == "" {
@@ -646,6 +647,10 @@ func jobUpdate(fields map[string]any) jenkins.JobUpdate {
 // viewUpdate 把前端提交的部分字段转成 jenkins.ViewUpdate。
 func viewUpdate(fields map[string]any) jenkins.ViewUpdate {
 	var update jenkins.ViewUpdate
+	if value, ok := fields["name"]; ok {
+		update.SetName = true
+		update.Name = stringValue(value)
+	}
 	if value, ok := fields["description"]; ok {
 		update.SetDescription = true
 		update.Description = stringValue(value)

@@ -4,7 +4,24 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 )
+
+// maxChangeMessageRunes 是变更信息截断上限，避免矩阵响应体过大。
+const maxChangeMessageRunes = 200
+
+// rawChange 是 Jenkins changelog 里的一条提交。
+type rawChange struct {
+	CommitID string `json:"commitId"`
+	Message  string `json:"msg"`
+	Author   struct {
+		FullName string `json:"fullName"`
+	} `json:"author"`
+}
+
+type rawChangeSet struct {
+	Items []rawChange `json:"items"`
+}
 
 type rawBuild struct {
 	Number      int    `json:"number"`
@@ -16,11 +33,9 @@ type rawBuild struct {
 	Actions     []struct {
 		Causes []Cause `json:"causes"`
 	} `json:"actions"`
-	ChangeSet struct {
-		Items []struct {
-			CommitID string `json:"commitId"`
-		} `json:"items"`
-	} `json:"changeSet"`
+	// Freestyle 用 changeSet，Pipeline（WorkflowRun）的 changelog 只出现在 changeSets。
+	ChangeSet  rawChangeSet   `json:"changeSet"`
+	ChangeSets []rawChangeSet `json:"changeSets"`
 }
 
 func (raw rawBuild) causes() []Cause {
@@ -29,6 +44,59 @@ func (raw rawBuild) causes() []Cause {
 		causes = append(causes, action.Causes...)
 	}
 	return causes
+}
+
+// changes 把构建的变更集归一化为阶段矩阵模型；没有变更时返回空切片而不是 nil。
+func (raw rawBuild) changes() []ChangeSetItem {
+	sets := make([][]rawChange, 0, 1+len(raw.ChangeSets))
+	sets = append(sets, raw.ChangeSet.Items)
+	for _, set := range raw.ChangeSets {
+		sets = append(sets, set.Items)
+	}
+
+	changes := mergeChanges(sets...)
+	for index := range changes {
+		changes[index].Message = truncateChangeMessage(changes[index].Message)
+	}
+	return changes
+}
+
+// mergeChanges 合并单数/复数 changelog，按 commitId 去重后归一化（保留完整信息）。
+func mergeChanges(sets ...[]rawChange) []ChangeSetItem {
+	total := 0
+	for _, items := range sets {
+		total += len(items)
+	}
+
+	changes := make([]ChangeSetItem, 0, total)
+	seen := make(map[string]bool, total)
+	for _, items := range sets {
+		for _, item := range items {
+			commitID := strings.TrimSpace(item.CommitID)
+			if commitID != "" {
+				if seen[commitID] {
+					continue
+				}
+				seen[commitID] = true
+			}
+			changes = append(changes, ChangeSetItem{
+				CommitID: commitID,
+				Message:  strings.TrimSpace(item.Message),
+				Author:   strings.TrimSpace(item.Author.FullName),
+			})
+		}
+	}
+	return changes
+}
+
+// truncateChangeMessage 去掉首尾空白；超长时按 rune 截断并补省略号，避免截断多字节字符。
+func truncateChangeMessage(message string) string {
+	message = strings.TrimSpace(message)
+	runes := []rune(message)
+	if len(runes) <= maxChangeMessageRunes {
+		return message
+	}
+	return string(runes[:maxChangeMessageRunes]) + "…"
 }
 
 // GetBuilds 读取任务最近的构建列表。
@@ -46,7 +114,7 @@ func (c *Client) GetBuilds(ctx context.Context, fullName string, limit int) ([]B
 	}
 
 	tree := fmt.Sprintf(
-		"builds[number,result,building,timestamp,duration,displayName,actions[causes[shortDescription,userId,userName]],changeSet[items[commitId]]]{0,%d}",
+		"builds[number,result,building,timestamp,duration,displayName,actions[causes[shortDescription,userId,userName]],changeSet[items[commitId,msg,author[fullName]]],changeSets[items[commitId,msg,author[fullName]]]]{0,%d}",
 		limit,
 	)
 	var payload struct {
@@ -59,6 +127,7 @@ func (c *Client) GetBuilds(ctx context.Context, fullName string, limit int) ([]B
 
 	builds := make([]BuildSummary, 0, len(payload.Builds))
 	for _, raw := range payload.Builds {
+		changes := raw.changes()
 		builds = append(builds, BuildSummary{
 			Number:      raw.Number,
 			Result:      raw.Result,
@@ -68,7 +137,8 @@ func (c *Client) GetBuilds(ctx context.Context, fullName string, limit int) ([]B
 			DisplayName: raw.DisplayName,
 			Causes:      raw.causes(),
 			Status:      StatusFromResult(raw.Result, raw.Building),
-			CommitCount: len(raw.ChangeSet.Items),
+			CommitCount: len(changes),
+			Changes:     changes,
 		})
 	}
 	return builds, nil
@@ -87,6 +157,7 @@ func (c *Client) GetBuild(ctx context.Context, fullName string, number int) (*Bu
 	tree := "number,result,building,timestamp,duration,estimatedDuration,displayName,fullDisplayName,url," +
 		"actions[causes[shortDescription,userId,userName]]," +
 		"changeSet[items[commitId,msg,author[fullName]]]," +
+		"changeSets[items[commitId,msg,author[fullName]]]," +
 		"artifacts[fileName,relativePath]"
 	var payload struct {
 		Number            int    `json:"number"`
@@ -101,16 +172,9 @@ func (c *Client) GetBuild(ctx context.Context, fullName string, number int) (*Bu
 		Actions           []struct {
 			Causes []Cause `json:"causes"`
 		} `json:"actions"`
-		ChangeSet struct {
-			Items []struct {
-				CommitID string `json:"commitId"`
-				Message  string `json:"msg"`
-				Author   struct {
-					FullName string `json:"fullName"`
-				} `json:"author"`
-			} `json:"items"`
-		} `json:"changeSet"`
-		Artifacts []Artifact `json:"artifacts"`
+		ChangeSet  rawChangeSet   `json:"changeSet"`
+		ChangeSets []rawChangeSet `json:"changeSets"`
+		Artifacts  []Artifact     `json:"artifacts"`
 	}
 	query := url.Values{"tree": {tree}}
 	path := fmt.Sprintf("%s/%d/api/json?%s", jobPath, number, query.Encode())
@@ -134,12 +198,11 @@ func (c *Client) GetBuild(ctx context.Context, fullName string, number int) (*Bu
 	for _, action := range payload.Actions {
 		build.Causes = append(build.Causes, action.Causes...)
 	}
-	for _, item := range payload.ChangeSet.Items {
-		build.ChangeSet = append(build.ChangeSet, ChangeSetItem{
-			CommitID: item.CommitID,
-			Message:  item.Message,
-			Author:   item.Author.FullName,
-		})
+	sets := make([][]rawChange, 0, 1+len(payload.ChangeSets))
+	sets = append(sets, payload.ChangeSet.Items)
+	for _, set := range payload.ChangeSets {
+		sets = append(sets, set.Items)
 	}
+	build.ChangeSet = mergeChanges(sets...)
 	return build, nil
 }

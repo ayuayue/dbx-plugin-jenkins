@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import logoUrl from "../assets/plugin.svg";
 import { describeError, jenkinsApi, setConnectionId } from "./api";
 import BuildView from "./components/BuildView.vue";
@@ -15,6 +15,17 @@ import StageView from "./components/StageView.vue";
 import ViewEditor from "./components/ViewEditor.vue";
 import { locale, syncLocale, t } from "./i18n";
 import { errorText } from "./lib/errors";
+import {
+  AUTO_REFRESH_INTERVAL_MS,
+  STAGE_AUTO_REFRESH_INTERVAL_MS,
+  createAutoRefresher,
+  createPendingBuild,
+  evaluatePendingBuild,
+  hasRunningBuild,
+  hasRunningStage,
+  type AutoRefresher,
+  type PendingBuild,
+} from "./lib/refresh";
 import type {
   BuildDetail,
   BuildSummary,
@@ -91,6 +102,11 @@ const canManageView = computed(
   () => activeView.value !== "" && activeView.value.toLowerCase() !== "all",
 );
 
+/** 已有视图名，用于编辑视图时的重名提示（Jenkins 判重区分大小写）。 */
+const viewNames = computed(() =>
+  views.value.map((item) => item.name).filter((item) => item !== ""),
+);
+
 const connectionLabel = computed(() => {
   if (identity.value?.version) return `Jenkins ${identity.value.version}`;
   return connectionName.value || t("unknownConnection");
@@ -100,8 +116,28 @@ const isPipeline = computed(() =>
   (selectedJob.value?.class ?? "").toLowerCase().includes("workflowjob"),
 );
 
+/** 刚触发、还没在构建列表里出现的构建；存在时构建列表保持自动刷新。 */
+const pendingBuild = ref<PendingBuild | null>(null);
+
+/** 当前视图是否需要自动刷新：构建列表有构建中 / 刚触发构建，或阶段视图有进行中的构建/阶段。 */
+const autoRefreshMode = computed<"builds" | "stages" | null>(() => {
+  if (view.value === "jobs" && selectedJob.value) {
+    if (hasRunningBuild(builds.value)) return "builds";
+    if (pendingBuild.value?.job === selectedJob.value.fullName) return "builds";
+  }
+  if (view.value === "stages" && hasRunningStage(stageMatrix.value)) {
+    return "stages";
+  }
+  return null;
+});
+
+const autoRefreshing = computed(() => autoRefreshMode.value !== null);
+
+let autoRefresher: AutoRefresher | null = null;
+
 let jobsToken = 0;
 let selectToken = 0;
+let stageToken = 0;
 
 function setError(error: unknown): void {
   errorMessage.value = errorText(describeError(error), locale.value);
@@ -174,6 +210,7 @@ async function activateView(name: string): Promise<void> {
   selectedBuild.value = null;
   stageMatrix.value = null;
   builds.value = [];
+  pendingBuild.value = null;
   view.value = "jobs";
   await loadJobs("");
 }
@@ -254,14 +291,23 @@ async function loadIdentity(): Promise<void> {
   }
 }
 
-async function selectJob(job: JobSummary): Promise<void> {
+/**
+ * 加载任务详情 + 构建列表。
+ * silent = true 时不置加载态、不清错误横幅，用于触发构建后的快速补刷。
+ */
+async function selectJob(
+  job: Pick<JobSummary, "fullName">,
+  silent = false,
+): Promise<void> {
   const token = ++selectToken;
   view.value = "jobs";
-  selectedBuild.value = null;
-  stageMatrix.value = null;
-  loadingJob.value = true;
-  loadingBuilds.value = true;
-  errorMessage.value = "";
+  if (!silent) {
+    selectedBuild.value = null;
+    stageMatrix.value = null;
+    loadingJob.value = true;
+    loadingBuilds.value = true;
+    errorMessage.value = "";
+  }
   try {
     const [detail, list] = await Promise.all([
       jenkinsApi.job(job.fullName),
@@ -270,24 +316,24 @@ async function selectJob(job: JobSummary): Promise<void> {
     if (token !== selectToken) return;
     selectedJob.value = detail;
     builds.value = list.builds;
+    settlePendingBuild(job.fullName, list.builds);
   } catch (error) {
-    if (token === selectToken) setError(error);
+    if (token === selectToken && !silent) setError(error);
   } finally {
-    if (token === selectToken) {
+    if (token === selectToken && !silent) {
       loadingJob.value = false;
       loadingBuilds.value = false;
     }
   }
 }
 
-async function refreshJob(): Promise<void> {
+async function refreshJob(silent = false): Promise<void> {
   if (!selectedJob.value) {
     await loadJobs(folder.value);
     return;
   }
-  const current = selectedJob.value.fullName;
-  const entry = jobs.value.find((job) => job.fullName === current);
-  if (entry) await selectJob(entry);
+  await selectJob({ fullName: selectedJob.value.fullName }, silent);
+  autoRefresher?.restart();
 }
 
 async function openBuild(number: number, rememberReturn = true): Promise<void> {
@@ -318,17 +364,93 @@ function closeBuild(): void {
 }
 
 async function loadStages(job: string): Promise<void> {
+  const token = ++stageToken;
   loadingStages.value = true;
   errorMessage.value = "";
   try {
-    stageMatrix.value = await jenkinsApi.stages(job, 10);
+    const matrix = await jenkinsApi.stages(job, 10);
+    if (token !== stageToken) return;
+    stageMatrix.value = matrix;
   } catch (error) {
+    if (token !== stageToken) return;
     stageMatrix.value = null;
     setError(error);
   } finally {
-    loadingStages.value = false;
+    if (token === stageToken) loadingStages.value = false;
   }
 }
+
+function pageHidden(): boolean {
+  return typeof document !== "undefined" && document.hidden;
+}
+
+/** 判定刚触发的构建是否已出现在列表里；settled / expired / stale 都清掉跟踪。 */
+function settlePendingBuild(job: string, list: BuildSummary[]): void {
+  const pending = pendingBuild.value;
+  if (!pending) return;
+  if (evaluatePendingBuild(pending, job, list) !== "watching") {
+    pendingBuild.value = null;
+  }
+}
+
+/** 静默刷新构建列表 + 任务详情：不置 loading，失败不弹错误。 */
+async function pollBuilds(): Promise<void> {
+  const job = selectedJob.value?.fullName;
+  if (!job || view.value !== "jobs" || pageHidden()) return;
+  try {
+    const [detail, list] = await Promise.all([
+      jenkinsApi.job(job),
+      jenkinsApi.builds(job, 20),
+    ]);
+    if (view.value !== "jobs" || selectedJob.value?.fullName !== job) return;
+    selectedJob.value = detail;
+    builds.value = list.builds;
+    settlePendingBuild(job, list.builds);
+  } catch {
+    // 自动刷新失败保持现有数据，下一轮继续重试。
+  }
+}
+
+/** 静默刷新阶段矩阵；不抢占 stageToken，手动刷新会让本轮旧响应作废。 */
+async function pollStages(): Promise<void> {
+  const job = selectedJob.value?.fullName;
+  if (!job || view.value !== "stages" || pageHidden()) return;
+  const token = stageToken;
+  try {
+    const matrix = await jenkinsApi.stages(job, 10);
+    if (
+      token !== stageToken ||
+      view.value !== "stages" ||
+      selectedJob.value?.fullName !== job
+    ) {
+      return;
+    }
+    stageMatrix.value = matrix;
+  } catch {
+    // 同上，静默重试。
+  }
+}
+
+function stopAutoRefresh(): void {
+  autoRefresher?.stop();
+  autoRefresher = null;
+}
+
+function startAutoRefresh(mode: "builds" | "stages"): void {
+  const refresher = createAutoRefresher({
+    intervalMs:
+      mode === "builds" ? AUTO_REFRESH_INTERVAL_MS : STAGE_AUTO_REFRESH_INTERVAL_MS,
+    task: mode === "builds" ? pollBuilds : pollStages,
+    shouldContinue: () => autoRefreshMode.value === mode,
+  });
+  autoRefresher = refresher;
+  refresher.start();
+}
+
+watch(autoRefreshMode, (mode) => {
+  stopAutoRefresh();
+  if (mode) startAutoRefresh(mode);
+});
 
 async function openStages(): Promise<void> {
   if (!selectedJob.value || !isPipeline.value) return;
@@ -336,16 +458,24 @@ async function openStages(): Promise<void> {
   await loadStages(selectedJob.value.fullName);
 }
 
-function refreshStages(): void {
-  if (selectedJob.value) void loadStages(selectedJob.value.fullName);
+async function refreshStages(): Promise<void> {
+  if (!selectedJob.value) return;
+  await loadStages(selectedJob.value.fullName);
+  autoRefresher?.restart();
 }
 
 async function triggerBuild(params: Record<string, unknown> = {}): Promise<void> {
-  if (!selectedJob.value) return;
+  const job = selectedJob.value;
+  if (!job) return;
   try {
-    const result = await jenkinsApi.trigger(selectedJob.value.fullName, params);
+    const result = await jenkinsApi.trigger(job.fullName, params);
     showNotice(t("buildQueued", { queueId: result.queueId || "?" }));
-    window.setTimeout(() => void refreshJob(), 1200);
+    // 参数化构建要排队后才分配构建号：先立即补刷一次，再跟踪到新构建出现为止。
+    pendingBuild.value = createPendingBuild(job.fullName, job.lastBuild?.number ?? 0);
+    void refreshJob(true);
+    window.setTimeout(() => {
+      if (pendingBuild.value?.job === job.fullName) void refreshJob(true);
+    }, 800);
   } catch (error) {
     setError(error);
   }
@@ -523,10 +653,18 @@ async function updateView(fields: ViewUpdateFields): Promise<void> {
   editorBusy.value = true;
   errorMessage.value = "";
   try {
-    await jenkinsApi.updateView(name, fields);
+    const result = await jenkinsApi.updateView(name, fields);
+    const nextName = result.fullName || name;
     viewEditor.value = null;
-    showNotice(t("viewUpdated"));
+    showNotice(
+      nextName !== name ? t("viewRenamed", { name: nextName }) : t("viewUpdated"),
+    );
     await loadViews();
+    if (nextName !== name) {
+      // 视图改名后 URL 变了，必须先切到新名再拉任务，否则会 404。
+      activeView.value = nextName;
+      folder.value = "";
+    }
     await loadJobs("");
   } catch (error) {
     setError(error);
@@ -648,6 +786,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("dbx-plugin-env", handleEnv);
   if (noticeTimer) window.clearTimeout(noticeTimer);
+  pendingBuild.value = null;
+  stopAutoRefresh();
 });
 </script>
 
@@ -759,6 +899,7 @@ onBeforeUnmount(() => {
           :matrix="stageMatrix"
           :loading="loadingStages"
           :locale="locale"
+          :auto-refreshing="autoRefreshing"
           @back="view = 'jobs'"
           @refresh="refreshStages"
           @open-build="openBuild"
@@ -803,6 +944,7 @@ onBeforeUnmount(() => {
             :read-only="readOnly"
             :is-pipeline="isPipeline"
             :locale="locale"
+            :auto-refreshing="autoRefreshing"
             @build="triggerBuild()"
             @build-with-params="showParams = true"
             @stop="stopLastBuild"
@@ -845,6 +987,7 @@ onBeforeUnmount(() => {
       :view="viewEditor.mode === 'edit' ? viewEditor.view : null"
       :config="viewEditor.mode === 'edit' ? viewEditor.config : null"
       :available-jobs="viewJobPool"
+      :existing-names="viewNames"
       :busy="editorBusy"
       @create="createView"
       @update="updateView"

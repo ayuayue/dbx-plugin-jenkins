@@ -3,7 +3,7 @@
 在 DBX 内管理 Jenkins 任务、构建、控制台日志、队列与节点。
 
 - 插件 ID：`io.github.nixing178.jenkins`
-- 当前版本：`0.3.0`（插件身份迁移到个人 ID `io.github.nixing178.jenkins`）
+- 当前版本：`0.4.0`（阶段视图支持悬停查看变更历史）
 - 形态：Go Sidecar + Vue3 静态工作台
 - 许可证：Apache-2.0
 
@@ -72,7 +72,7 @@ pnpm test
 
 - 连接 / whoami / 任务 / 参数 / 构建 / 控制台 / 停止 / 队列 / 节点 / 概览
 - 任务按 Jenkins 原生 Views 分组（all/Builds/Ops 已实测）
-- Pipeline 任务支持阶段视图：构建 × stage 矩阵、平均耗时、失败/进行中/跳过着色
+- Pipeline 任务支持阶段视图：构建 × stage 矩阵、平均耗时、失败/进行中/跳过着色；行首提交数悬停/点击展开变更浮层（哈希、信息、作者），可跳转构建详情
 - 无参与带参构建、只读拦截、MCP `list_jobs`
 - 完整步骤与实测输出：[`docs/e2e-jenkins.md`](./docs/e2e-jenkins.md)
 - 脚本：[`scripts/e2e-jenkins.js`](./scripts/e2e-jenkins.js)
@@ -87,18 +87,28 @@ pnpm test
 | 编辑任务 | 任务详情右上「编辑」 | 表单改名称、描述、启用状态、Pipeline 脚本；高级页签可直接改 config.xml |
 | 删除任务 | 任务详情右上「删除」 | 需手动输入任务名确认；同时删除全部构建历史 |
 | 新建视图 | 面包屑右侧 `＋` | ListView；可勾选任务、填包含正则、递归子文件夹 |
-| 编辑视图 | 面包屑右侧 `⋯` | 表单或原始 XML；非 ListView 仅支持 XML |
+| 编辑视图 | 面包屑右侧 `⋯` | 表单改名称、描述、任务清单、包含正则；非 ListView 仅支持 XML |
 | 删除视图 | 面包屑右侧 `⋯` | 需手动输入视图名确认；不会删除视图内任务 |
 
 实现要点：
 
 - 编辑配置采用 **XML 局部改写**，只替换 `description` / `disabled` / `script` / `jobNames` 等目标节点，SCM、构建步骤、插件字段原样保留。
+- **视图改名**走 `POST /view/<name>/configSubmit`（`config.xml` 提交路径明确拒绝覆盖名称），并提交完整结构化表单，避免 Jenkins 全量重建时清空任务与列；改名后再用原 XML 回写一次，恢复 `properties` / `jobFilters` 等表单覆盖不到的字段。
 - Pipeline 脚本与 config.xml 使用内嵌代码编辑器：Groovy / XML 语法高亮、行号、当前行高亮，`Tab` / `Shift+Tab` 缩进，右上「展开」切全屏编辑（`Esc` 先收起编辑器，再按才关闭窗口）。零外部依赖，产物只增约 1 KB。
 - 表单只提交**发生变化的字段**，未修改项不会被重写。
 - 所有写操作复用后端的只读守卫、CSRF crumb 刷新重试与权限错误映射。
 - Jenkins 返回 HTML 错误页时，提示会收敛为「HTML error page (HTTP xxx)」，不再把整页 HTML 塞给用户。
 
 所需 Jenkins 权限：`Item/Create`、`Item/Configure`、`Item/Delete`、`View/Create`、`View/Configure`、`View/Delete`。
+
+## 自动刷新
+
+- **构建列表**：当前任务的构建里存在「构建中」时，每 3s 静默刷新任务详情与最近 20 次构建；最后一条构建结束后自动停止。
+- **刚触发的构建**：点「带参数构建」/「立即构建」后立即静默补刷一次、800ms 再补一次，并持续跟踪到新构建出现在列表里（最长 120s，排队过久自动放弃）。
+- **阶段视图**：存在构建中或 `IN_PROGRESS` 的 stage 时，每 5s 静默刷新最近 10 次构建的阶段矩阵。
+- 静默刷新不会闪「加载中…」占位，请求失败也不弹错误横幅；手动刷新会重置计时，避免刚点完又自动刷一次。
+- 切换任务 / 视图、进入构建详情、关闭工作台即停止；页面不可见时跳过请求，回到前台后的下一轮自动恢复。
+- 面板标题旁的绿点「自动刷新中」表示轮询正在进行。
 
 ## 打包
 
@@ -119,8 +129,8 @@ node scripts/verify-sidecar-identity.mjs dist\dbx-plugin-jenkins.exe   # 校验�
 产物：
 
 ```
-dist/io.github.nixing178.jenkins-0.3.0-windows-x64.dbxp
-dist/io.github.nixing178.jenkins-0.3.0-windows-x64.artifact.json
+dist/io.github.nixing178.jenkins-0.4.0-windows-x64.dbxp
+dist/io.github.nixing178.jenkins-0.4.0-windows-x64.artifact.json
 ```
 
 ## 发布到 DBX 插件商店
@@ -132,9 +142,9 @@ dist/io.github.nixing178.jenkins-0.3.0-windows-x64.artifact.json
 `ui/` 与 `dist/` 不进 Git，候选包由 CI 从源码重建，因此本地 `dist/` 的哈希不能用于上架。
 
 ```bash
-git tag v0.3.0
+git tag v0.4.0
 git push origin main --tags
-# GitHub → Releases → Draft a new release → 选 v0.3.0 → Publish
+# GitHub → Releases → Draft a new release → 选 v0.4.0 → Publish
 ```
 
 `.github/workflows/plugin-release.yml` 会复用官方 `plugin-release-reusable.yml`，自动产出并上传三个资产：
@@ -160,7 +170,7 @@ git push origin main --tags
 ## 本地安装
 
 1. DBX → 插件中心 → 设置 → 打开「允许安装未签名开发包」。
-2. 插件中心 → 安装 → 从文件 → 选择 `dist/io.github.nixing178.jenkins-0.3.0-windows-x64.dbxp`。
+2. 插件中心 → 安装 → 从文件 → 选择 `dist/io.github.nixing178.jenkins-0.4.0-windows-x64.dbxp`。
 3. 新建连接，类型选 **Jenkins**，填写地址、端口、用户名与 API Token。
 4. 从 `com.anjun.jenkins` 旧版升级时：两者是不同插件，需先在插件中心卸载旧版，再安装新版。
 
@@ -210,10 +220,12 @@ git push origin main --tags
 | M4 MCP 工具面 | 已完成（120 后端用例全绿，10 工具冒烟通过） |
 | M5 打包验收 | E2E 已完成（Jenkins 2.586 全链路通过）；待本机安装验收 |
 | M6 视图 / 任务 CRUD | 已完成（84 jenkins + 45 rpc 用例；真实 Jenkins 2.586 建/改/删/重命名/只读拦截 E2E 通过） |
+| M7 运行时自动刷新 | 已完成（构建列表 3s / 阶段视图 5s 静默轮询，构建结束自动停止） |
+| M8 触发后跟踪新构建 | 已完成（触发即补刷 + 持续跟踪至新构建出现，120s 上限；114 前端用例全绿） |
 
 > 任务列表已按 Jenkins 原生 Views 分组：顶部 Tab 切换视图，视图内分「文件夹 / 任务」两组。
 > Tab 溢出时左右箭头滚动，当前视图自动居中；打开视图自动选中首个任务；左栏宽 320px。
-> 当前测试基线：129 后端用例 + 55 前端用例。
+> 当前测试基线：129 后端用例 + 102 前端用例。
 >
 > Pipeline 创建依赖 Jenkins 的 `workflow-job` / `workflow-cps` 插件；实例未安装时 Jenkins 返回 500，插件会给出去敏的 HTML 错误提示，不会创建半成品任务。
 

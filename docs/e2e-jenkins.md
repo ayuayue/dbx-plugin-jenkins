@@ -109,6 +109,7 @@ node scripts/e2e-jenkins.js dist\dbx-plugin-jenkins.exe
 - `jenkins/console`：`progressiveText` 增量，包含 `hello from dbx` / `branch=dev`
 - `jenkins/stop`：中止 `slow-job`，最终 `ABORTED`
 - `jenkins/stages`：`pipeline-demo` 7 个 stage × 最近 5 次构建，`WorkflowJob` 类识别、平均耗时聚合
+- `jenkins/stages` 变更集：需带 SCM 的 Pipeline。要点：装 git 插件并以 `-Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true` 启动；SCM URL 直接写盘符路径（`file:///C:/...` 会被 Git for Windows 改写成 `/C:/...`）；首次构建会 `Skipping changelog`，提交一次变更后再次构建才有数据。Pipeline 的 changelog 在 `changeSets`（复数），Freestyle 在 `changeSet`（单数），插件两者都读并按 commitId 去重
 - `jenkins/queue` / `jenkins/nodes` / `jenkins/overview`
 - `mcp/tools` / `mcp/call list_jobs`
 - 只读连接触发构建 → `read_only: connection is in read-only mode`
@@ -159,6 +160,19 @@ E2E OK
 - 任务编辑先 `doRename`（如有改名），再读取新路径的 config.xml 局部改写后写回。
 - Pipeline 新建需实例安装 `workflow-job` / `workflow-cps`；本次实例插件下载超时未装，脚本自动跳过该段，Pipeline 模板由单测覆盖。
 - 非 ListView（如 AllView）读取配置时 `fields` 返回 `null`，前端自动退化为原始 XML 编辑。
+
+## 5.2 视图改名实测（0.4.0）
+
+- 改名唯一入口：`POST /view/<old>/configSubmit`（`View.doConfigSubmit` → `rename()` → `owner.onViewRenamed`）；`POST config.xml` 的 `updateByXml` 明确拒绝覆盖名称。
+- configSubmit 是**全量提交**：只带 `name` 时 `jobNames` 与 `columns` 会被清空、`recurse` 变 `true`（实测）。因此插件补齐 `json`（description/recurse/filterQueue/filterExecutors/columns）与每个任务的 `item_<job>`，有正则时补 `useincluderegex` / `includeRegex`。
+- 改名后立刻用原 XML 回写新路径，恢复 `properties` / `jobFilters` 等表单覆盖不到的字段。
+- 重名/非法名 Jenkins 返回 400 HTML 页面，插件在改名**前**用 `/api/json?tree=views[name]` 预校验（区分大小写）。
+
+```text
+CRUD view updated: "updated by dbx" demo,param-demo
+CRUD view renamed: CRUD-View-Renamed "updated by dbx" demo,param-demo
+CRUD cleanup ok
+```
 
 ## 6. E2E 发现并修复的问题
 **`computer.idle` 是布尔值，不是空闲执行器数量。**

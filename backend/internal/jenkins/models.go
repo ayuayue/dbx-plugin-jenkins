@@ -73,6 +73,8 @@ type BuildSummary struct {
 	Causes      []Cause `json:"causes"`
 	Status      Status  `json:"status"`
 	CommitCount int     `json:"commitCount"`
+	// Changes 只在内部传给阶段矩阵，不进入 jenkins/builds 的响应体。
+	Changes []ChangeSetItem `json:"-"`
 }
 
 // Stage 是 Pipeline 构建里的一个阶段。
@@ -87,13 +89,14 @@ type Stage struct {
 
 // StageBuild 是阶段矩阵里的一行构建。
 type StageBuild struct {
-	Number      int     `json:"number"`
-	Result      string  `json:"result"`
-	Status      string  `json:"status"`
-	Timestamp   int64   `json:"timestamp"`
-	Duration    int64   `json:"duration"`
-	CommitCount int     `json:"commitCount"`
-	Stages      []Stage `json:"stages"`
+	Number      int             `json:"number"`
+	Result      string          `json:"result"`
+	Status      string          `json:"status"`
+	Timestamp   int64           `json:"timestamp"`
+	Duration    int64           `json:"duration"`
+	CommitCount int             `json:"commitCount"`
+	Changes     []ChangeSetItem `json:"changes"`
+	Stages      []Stage         `json:"stages"`
 }
 
 // StageAverage 是某个阶段的平均耗时。
