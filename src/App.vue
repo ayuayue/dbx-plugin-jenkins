@@ -26,6 +26,13 @@ import {
   type AutoRefresher,
   type PendingBuild,
 } from "./lib/refresh";
+import {
+  appendJobName,
+  containsJob,
+  isNamedView,
+  needsJoinView,
+  resolveJoinAction,
+} from "./lib/viewRefresh";
 import type {
   BuildDetail,
   BuildSummary,
@@ -98,9 +105,7 @@ const deleteTarget = ref<DeleteTarget | null>(null);
 const editorBusy = ref(false);
 const viewJobPool = ref<string[]>([]);
 
-const canManageView = computed(
-  () => activeView.value !== "" && activeView.value.toLowerCase() !== "all",
-);
+const canManageView = computed(() => isNamedView(activeView.value));
 
 /** 已有视图名，用于编辑视图时的重名提示（Jenkins 判重区分大小写）。 */
 const viewNames = computed(() =>
@@ -149,10 +154,16 @@ function showNotice(message: string): void {
   noticeTimer = window.setTimeout(() => (notice.value = ""), 4000);
 }
 
-async function loadJobs(path: string): Promise<void> {
+/**
+ * 刷新左侧任务列表。
+ * silent = true 时不置加载态、不清错误横幅，失败也不弹错，用于构建轮询与新建后的静默补刷。
+ */
+async function loadJobs(path: string, silent = false): Promise<void> {
   const token = ++jobsToken;
-  loadingJobs.value = true;
-  errorMessage.value = "";
+  if (!silent) {
+    loadingJobs.value = true;
+    errorMessage.value = "";
+  }
   try {
     const useView = path === "" && activeView.value !== "";
     const result = useView
@@ -170,7 +181,7 @@ async function loadJobs(path: string): Promise<void> {
     if (!stillThere) {
       const first = result.jobs.find((job) => !job.isFolder);
       if (first) {
-        void selectJob(first);
+        void selectJob(first, silent);
       } else {
         selectedJob.value = null;
         builds.value = [];
@@ -179,8 +190,9 @@ async function loadJobs(path: string): Promise<void> {
       }
     }
   } catch (error) {
-    if (token === jobsToken) setError(error);
+    if (token === jobsToken && !silent) setError(error);
   } finally {
+    // 静默请求也可能持有最新 token，必须一并关掉上一个请求留下的加载态。
     if (token === jobsToken) loadingJobs.value = false;
   }
 }
@@ -320,7 +332,8 @@ async function selectJob(
   } catch (error) {
     if (token === selectToken && !silent) setError(error);
   } finally {
-    if (token === selectToken && !silent) {
+    // 静默补刷可能覆盖上一个非静默请求的 token，这里必须负责收尾。
+    if (token === selectToken) {
       loadingJob.value = false;
       loadingBuilds.value = false;
     }
@@ -388,9 +401,11 @@ function pageHidden(): boolean {
 function settlePendingBuild(job: string, list: BuildSummary[]): void {
   const pending = pendingBuild.value;
   if (!pending) return;
-  if (evaluatePendingBuild(pending, job, list) !== "watching") {
-    pendingBuild.value = null;
-  }
+  const status = evaluatePendingBuild(pending, job, list);
+  if (status === "watching") return;
+  pendingBuild.value = null;
+  // 新构建真正出现后补刷任务列表：此时圆点与 #构建号 才会更新。
+  if (status === "settled") void loadJobs(folder.value, true);
 }
 
 /** 静默刷新构建列表 + 任务详情：不置 loading，失败不弹错误。 */
@@ -447,9 +462,16 @@ function startAutoRefresh(mode: "builds" | "stages"): void {
   refresher.start();
 }
 
-watch(autoRefreshMode, (mode) => {
+watch(autoRefreshMode, (mode, previous) => {
   stopAutoRefresh();
-  if (mode) startAutoRefresh(mode);
+  if (mode) {
+    startAutoRefresh(mode);
+    return;
+  }
+  // 构建结束、轮询停止时补一次静默刷新，让列表圆点与构建号收敛到最终状态。
+  if (previous === "builds" && view.value === "jobs") {
+    void loadJobs(folder.value, true);
+  }
 });
 
 async function openStages(): Promise<void> {
@@ -473,8 +495,13 @@ async function triggerBuild(params: Record<string, unknown> = {}): Promise<void>
     // 参数化构建要排队后才分配构建号：先立即补刷一次，再跟踪到新构建出现为止。
     pendingBuild.value = createPendingBuild(job.fullName, job.lastBuild?.number ?? 0);
     void refreshJob(true);
+    // 列表里的圆点与构建号也要跟着变，否则左侧看起来像没触发。
+    void loadJobs(folder.value, true);
     window.setTimeout(() => {
-      if (pendingBuild.value?.job === job.fullName) void refreshJob(true);
+      if (pendingBuild.value?.job === job.fullName) {
+        void refreshJob(true);
+        void loadJobs(folder.value, true);
+      }
     }, 800);
   } catch (error) {
     setError(error);
@@ -551,15 +578,71 @@ async function openEditJob(): Promise<void> {
   }
 }
 
+type JoinViewResult = "added" | "skipped" | "failed";
+
+/**
+ * 新建任务后把它写进当前命名视图。
+ * Jenkins 的 ListView 是显式任务集合，不写回的话刷新也看不到新任务。
+ * 只做追加：以服务端刚读到的 jobNames 为基线，不动描述、列与过滤规则。
+ */
+async function joinActiveView(
+  fullName: string,
+  createdIn: string,
+): Promise<JoinViewResult> {
+  if (
+    !needsJoinView({
+      folder: createdIn,
+      activeView: activeView.value,
+      fullName,
+      jobs: jobs.value,
+    })
+  ) {
+    return "skipped";
+  }
+
+  const view = activeView.value;
+  try {
+    const config = await jenkinsApi.viewConfig(view);
+    if (resolveJoinAction(config.fields) !== "add" || !config.fields) {
+      return "failed";
+    }
+    await jenkinsApi.updateView(view, {
+      jobNames: appendJobName(config.fields.jobNames, fullName),
+    });
+    // 请求期间用户可能切走视图，此时不再按旧视图校验。
+    if (activeView.value !== view) return "added";
+    await loadJobs("", true);
+    return containsJob(jobs.value, fullName) ? "added" : "failed";
+  } catch {
+    // 任务已经创建成功，写视图失败不回滚，交给提示引导用户手动添加。
+    return "failed";
+  }
+}
+
 async function createJob(payload: CreateJobPayload): Promise<void> {
   editorBusy.value = true;
   errorMessage.value = "";
   try {
     const result = await jenkinsApi.createJob(payload);
+    const fullName = result.fullName ?? payload.name;
     jobEditor.value = null;
-    showNotice(t("jobCreated", { name: result.fullName ?? payload.name }));
-    await loadJobs(folder.value);
-    if (result.fullName) await selectByFullName(result.fullName);
+
+    // 先刷新列表：正则视图或全部视图能立即包含新任务，避免多余的写请求。
+    await loadJobs(folder.value, true);
+    const join = await joinActiveView(fullName, payload.folder);
+    await selectByFullName(fullName);
+
+    if (join === "added") {
+      showNotice(
+        t("jobCreatedInView", { name: fullName, view: activeView.value }),
+      );
+    } else if (join === "failed") {
+      showNotice(
+        t("jobCreatedNotInView", { name: fullName, view: activeView.value }),
+      );
+    } else {
+      showNotice(t("jobCreated", { name: fullName }));
+    }
   } catch (error) {
     setError(error);
   } finally {

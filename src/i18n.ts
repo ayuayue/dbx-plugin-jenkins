@@ -161,6 +161,9 @@ const en = {
   deleteTypeName: "Type the name to confirm",
   deleteNameMismatch: "Name does not match.",
   jobCreated: "Job {name} created.",
+  jobCreatedInView: "Job {name} created and added to view {view}.",
+  jobCreatedNotInView:
+    "Job {name} created, but it could not be added to view {view}. Add it from Manage view if needed.",
   jobUpdated: "Job saved.",
   jobDeleted: "Job deleted.",
   viewCreated: "View {name} created.",
@@ -329,6 +332,9 @@ const zh: Record<keyof typeof en, string> = {
   deleteTypeName: "输入名称以确认",
   deleteNameMismatch: "名称不匹配。",
   jobCreated: "任务 {name} 已创建。",
+  jobCreatedInView: "任务 {name} 已创建，并加入视图 {view}。",
+  jobCreatedNotInView:
+    "任务 {name} 已创建，但未能加入视图 {view}，可在「管理视图」中手动添加。",
   jobUpdated: "任务已保存。",
   jobDeleted: "任务已删除。",
   viewCreated: "视图 {name} 已创建。",

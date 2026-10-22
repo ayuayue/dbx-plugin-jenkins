@@ -4,6 +4,7 @@ import { t } from "../i18n";
 import { groupJobs } from "../lib/jobs";
 import { statusMeta } from "../lib/status";
 import { tabWheelDelta } from "../lib/tabs";
+import { isNamedView } from "../lib/viewRefresh";
 import type { JobSummary, ViewInfo } from "../types";
 
 const props = defineProps<{
@@ -35,9 +36,7 @@ const canScrollLeft = ref(false);
 const canScrollRight = ref(false);
 const menuOpen = ref(false);
 
-const canManageView = computed(
-  () => props.activeView !== "" && props.activeView.toLowerCase() !== "all",
-);
+const canManageView = computed(() => isNamedView(props.activeView));
 
 const crumbs = computed(() => (props.folder ? props.folder.split("/") : []));
 const rootLabel = computed(() =>

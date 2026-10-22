@@ -378,6 +378,37 @@ E2E OK
 - RPC `jenkins/updateView` 返回 `fullName`；
 - 前端 `buildViewUpdateFields` 比对 trim 后的名称，空名等于不修改。
 
+### AT：新建任务后视图任务列表不刷新（0.4.1）
+
+红（先写测试，`src/lib/viewRefresh.ts` 尚未实现）：
+
+```
+FAIL  src/lib/viewRefresh.test.ts [ src/lib/viewRefresh.test.ts ]
+Error: Failed to load url ./viewRefresh (resolved id: ./viewRefresh) in E:/DBX插件开发/Jenkins/src/lib/viewRefresh.test.ts. Does the file exist?
+ Test Files  1 failed | 11 passed (12)
+      Tests  129 passed (129)
+```
+
+绿（实现纯函数 + `App.vue` / `JobList.vue` 接线）：
+
+```
+ ✓ src/lib/viewRefresh.test.ts (18 tests)
+ Test Files  12 passed (12)
+      Tests  147 passed (147)
+```
+
+`pnpm typecheck` 无报错；`pnpm build` 通过（`ui/index.html` 202.41 kB）；`go test ./...` 通过；`check-version` 0.4.1 四处一致。
+
+覆盖：
+
+- `isNamedView`：空串 / 纯空白 / `null` / `undefined` / `all` / `ALL` 均非命名视图；首尾空白不影响自定义视图名；
+- `containsJob`：按 `fullName` 精确匹配（`demo` 不命中 `demo2`），空名与空列表恒 false；
+- `appendJobName`：空集合追加、保持原顺序末尾追加、已存在不重复、`null` 按空集合、输入 trim 与去空白项、空任务名不写入；
+- `needsJoinView`：根目录 + 命名视图 + 列表不含新任务才成立；已包含（正则视图）、文件夹内创建、`all`/空视图名、空任务名均跳过；
+- `resolveJoinAction`：不需要写回 → `skip`；ListView（含 `jobNames: null`）→ `add`；`fields` 为 `null`（聚合视图等）→ `unsupported`。
+
+UI 接线：`createJob` 先静默刷新列表，再按 `needsJoinView` 读 `viewConfig` 追加 `jobNames` 并回写，最后按结果给三种提示（加入视图 / 普通创建 / 创建但未加入）；`triggerBuild` 触发后与 800ms 补刷各刷一次列表，`settlePendingBuild` 在 `settled` 时刷新一次，`autoRefreshMode` 由 `builds` 转 `null` 时再收敛刷新一次。
+
 ## 覆盖点
 
 - `BaseURL`：scheme/host/port 校验、base_path 归一化、IPv6、非法输入。
