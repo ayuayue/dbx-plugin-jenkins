@@ -98,7 +98,8 @@ pnpm test
 - 表单只提交**发生变化的字段**，未修改项不会被重写。
 - 所有写操作复用后端的只读守卫、CSRF crumb 刷新重试与权限错误映射。
 - **新建任务后列表自动刷新**：在自定义 ListView 下新建任务，会把任务追加进该视图的 `jobNames`（只追加、以服务端最新清单为基线，不动描述 / 列 / 过滤规则），随后刷新列表并选中；正则视图已匹配时不产生写请求；非 ListView（如聚合视图）只提示「已创建，但未能加入视图」。
-- Jenkins 返回 HTML 错误页时，提示会收敛为「HTML error page (HTTP xxx)」，不再把整页 HTML 塞给用户。
+- Jenkins 返回 HTML 错误页时，优先提取页面里的可读原因（任务重名、非法字符等），直接显示「请求被 Jenkins 拒绝：<原因>」；只有 500 Oops 页这类没有原因的错误才收敛为「HTML error page (HTTP xxx)」并附上 `Logging ID`，绝不把整页 HTML 塞给用户。
+- 任务 / 视图名称在前端与后端都按 Jenkins `NameValidator` 校验：`/ \ ? # % * : < > | & ; ! @ $ ^ [ ] "` 先行拦截，避免落到 Jenkins 的 400 / 500。
 
 所需 Jenkins 权限：`Item/Create`、`Item/Configure`、`Item/Delete`、`View/Create`、`View/Configure`、`View/Delete`。
 

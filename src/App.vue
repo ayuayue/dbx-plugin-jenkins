@@ -12,9 +12,11 @@ import OverviewView from "./components/OverviewView.vue";
 import ParamDialog from "./components/ParamDialog.vue";
 import QueueView from "./components/QueueView.vue";
 import StageView from "./components/StageView.vue";
+import ToastHost from "./components/ToastHost.vue";
 import ViewEditor from "./components/ViewEditor.vue";
 import { locale, syncLocale, t } from "./i18n";
 import { errorText } from "./lib/errors";
+import { createToastQueue, type ToastItem, type ToastTone } from "./lib/toast";
 import {
   AUTO_REFRESH_INTERVAL_MS,
   STAGE_AUTO_REFRESH_INTERVAL_MS,
@@ -82,8 +84,11 @@ const loadingBuilds = ref(false);
 const loadingView = ref(false);
 const showParams = ref(false);
 const errorMessage = ref("");
-const notice = ref("");
-let noticeTimer: number | undefined;
+/** 操作提示改为浮层 toast：只占视觉，不挤压页面布局。 */
+const toasts = ref<ToastItem[]>([]);
+const toastQueue = createToastQueue({
+  onChange: (items) => (toasts.value = items),
+});
 
 type JobEditorState =
   | { mode: "create" }
@@ -148,10 +153,13 @@ function setError(error: unknown): void {
   errorMessage.value = errorText(describeError(error), locale.value);
 }
 
-function showNotice(message: string): void {
-  notice.value = message;
-  if (noticeTimer) window.clearTimeout(noticeTimer);
-  noticeTimer = window.setTimeout(() => (notice.value = ""), 4000);
+/** 成功提示走 success，纯提示（只读拦截等）走 info。 */
+function showToast(message: string, tone: ToastTone = "success"): void {
+  toastQueue.push(message, tone);
+}
+
+function dismissToast(id: number): void {
+  toastQueue.dismiss(id);
 }
 
 /**
@@ -280,7 +288,7 @@ async function cancelQueueItem(id: number): Promise<void> {
   if (!window.confirm(t("cancelConfirm", { id }))) return;
   try {
     await jenkinsApi.cancelQueue(id);
-    showNotice(t("cancelSuccess"));
+    showToast(t("cancelSuccess"));
     await loadQueue();
   } catch (error) {
     setError(error);
@@ -491,7 +499,7 @@ async function triggerBuild(params: Record<string, unknown> = {}): Promise<void>
   if (!job) return;
   try {
     const result = await jenkinsApi.trigger(job.fullName, params);
-    showNotice(t("buildQueued", { queueId: result.queueId || "?" }));
+    showToast(t("buildQueued", { queueId: result.queueId || "?" }));
     // 参数化构建要排队后才分配构建号：先立即补刷一次，再跟踪到新构建出现为止。
     pendingBuild.value = createPendingBuild(job.fullName, job.lastBuild?.number ?? 0);
     void refreshJob(true);
@@ -513,7 +521,7 @@ async function stopBuild(number: number): Promise<void> {
   if (!window.confirm(t("stopConfirm", { number }))) return;
   try {
     await jenkinsApi.stop(selectedJob.value.fullName, number);
-    showNotice(t("stopSuccess"));
+    showToast(t("stopSuccess"));
     window.setTimeout(() => {
       void refreshJob();
       if (view.value === "build") void refreshBuild();
@@ -536,7 +544,7 @@ function submitParams(params: Record<string, unknown>): void {
 /** 只读连接下所有 CRUD 入口统一拦截。 */
 function guardWrite(): boolean {
   if (!readOnly.value) return true;
-  showNotice(t("readOnlyManageHint"));
+  showToast(t("readOnlyManageHint"), "info");
   return false;
 }
 
@@ -633,15 +641,17 @@ async function createJob(payload: CreateJobPayload): Promise<void> {
     await selectByFullName(fullName);
 
     if (join === "added") {
-      showNotice(
+      showToast(
         t("jobCreatedInView", { name: fullName, view: activeView.value }),
       );
     } else if (join === "failed") {
-      showNotice(
+      // 任务建好了但没进视图，属于部分成功：用 info 语气提示，别给绿色勾。
+      showToast(
         t("jobCreatedNotInView", { name: fullName, view: activeView.value }),
+        "info",
       );
     } else {
-      showNotice(t("jobCreated", { name: fullName }));
+      showToast(t("jobCreated", { name: fullName }));
     }
   } catch (error) {
     setError(error);
@@ -658,7 +668,7 @@ async function updateJob(fields: JobUpdateFields): Promise<void> {
   try {
     const result = await jenkinsApi.updateJob(previous, fields);
     jobEditor.value = null;
-    showNotice(t("jobUpdated"));
+    showToast(t("jobUpdated"));
     await loadJobs(folder.value);
     await selectByFullName(result.fullName ?? previous);
   } catch (error) {
@@ -676,7 +686,7 @@ async function saveJobXml(xml: string): Promise<void> {
   try {
     await jenkinsApi.saveJob(fullName, xml);
     jobEditor.value = null;
-    showNotice(t("jobUpdated"));
+    showToast(t("jobUpdated"));
     await loadJobs(folder.value);
     await selectByFullName(fullName);
   } catch (error) {
@@ -719,7 +729,7 @@ async function createView(payload: CreateViewPayload): Promise<void> {
   try {
     await jenkinsApi.createView(payload);
     viewEditor.value = null;
-    showNotice(t("viewCreated", { name: payload.name }));
+    showToast(t("viewCreated", { name: payload.name }));
     await loadViews();
     activeView.value = payload.name;
     folder.value = "";
@@ -739,7 +749,7 @@ async function updateView(fields: ViewUpdateFields): Promise<void> {
     const result = await jenkinsApi.updateView(name, fields);
     const nextName = result.fullName || name;
     viewEditor.value = null;
-    showNotice(
+    showToast(
       nextName !== name ? t("viewRenamed", { name: nextName }) : t("viewUpdated"),
     );
     await loadViews();
@@ -763,7 +773,7 @@ async function saveViewXml(xml: string): Promise<void> {
   try {
     await jenkinsApi.saveView(name, xml);
     viewEditor.value = null;
-    showNotice(t("viewUpdated"));
+    showToast(t("viewUpdated"));
     await loadViews();
     await loadJobs("");
   } catch (error) {
@@ -795,7 +805,7 @@ async function confirmDelete(): Promise<void> {
   try {
     if (target.kind === "job") {
       await jenkinsApi.deleteJob(target.fullName ?? target.name);
-      showNotice(t("jobDeleted"));
+      showToast(t("jobDeleted"));
       deleteTarget.value = null;
       selectedJob.value = null;
       builds.value = [];
@@ -804,7 +814,7 @@ async function confirmDelete(): Promise<void> {
       await loadJobs(folder.value);
     } else {
       await jenkinsApi.deleteView(target.name);
-      showNotice(t("viewDeleted"));
+      showToast(t("viewDeleted"));
       deleteTarget.value = null;
       await loadViews();
       await loadJobs("");
@@ -868,7 +878,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("dbx-plugin-env", handleEnv);
-  if (noticeTimer) window.clearTimeout(noticeTimer);
+  toastQueue.clear();
   pendingBuild.value = null;
   stopAutoRefresh();
 });
@@ -950,7 +960,6 @@ onBeforeUnmount(() => {
           <span>{{ errorMessage }}</span>
           <button type="button" @click="loadIdentity">{{ t("retry") }}</button>
         </div>
-        <div v-if="notice" class="banner notice">{{ notice }}</div>
 
         <OverviewView
           v-if="view === 'overview'"
@@ -1087,6 +1096,8 @@ onBeforeUnmount(() => {
       @confirm="confirmDelete"
       @cancel="deleteTarget = null"
     />
+
+    <ToastHost :items="toasts" @dismiss="dismissToast" />
   </div>
 </template>
 
@@ -1259,11 +1270,6 @@ onBeforeUnmount(() => {
 .banner.error {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
-}
-
-.banner.notice {
-  background: color-mix(in srgb, var(--success) 12%, transparent);
-  color: var(--success);
 }
 
 .banner button {

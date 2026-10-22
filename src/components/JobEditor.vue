@@ -61,6 +61,8 @@ const original = computed(() => ({
 const folderLabel = computed(() => props.folder || t("rootFolderPath"));
 
 function submit(): void {
+  // 按钮的 disabled 要等渲染才生效，这里先挡住重复提交（否则第二次必然重名 400）。
+  if (props.busy) return;
   error.value = "";
   if (!isEdit.value) {
     const nameError = validateName(name.value);

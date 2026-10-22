@@ -11,6 +11,12 @@ describe("errorKind", () => {
     expect(errorKind("network down")).toBeNull();
     expect(errorKind("")).toBeNull();
   });
+
+  it("reads the kind after an RPC method prefix", () => {
+    expect(errorKind("jenkins/createJob: rejected: boom")).toBe("rejected");
+    expect(errorKind("connection/connect: timeout: dial")).toBe("timeout");
+    expect(errorKind("mcp/call: forbidden: denied")).toBe("forbidden");
+  });
 });
 
 describe("errorText", () => {
@@ -21,7 +27,9 @@ describe("errorText", () => {
     expect(errorText("timeout: deadline", "zh")).toBe("连接 Jenkins 超时");
     expect(errorText("network: dial", "zh")).toBe("无法访问 Jenkins，请检查网络与证书");
     expect(errorText("read_only: blocked", "zh")).toBe("当前连接处于只读模式");
-    expect(errorText("invalid_config: host", "zh")).toBe("连接配置不完整，请检查地址与端口");
+    expect(errorText("invalid_config: host", "zh")).toBe(
+      "连接配置不完整，请检查地址与端口：host",
+    );
     expect(errorText("not_connected: none", "zh")).toBe("连接尚未建立，请断开后重新连接");
   });
 
@@ -39,5 +47,28 @@ describe("errorText", () => {
 
   it("keeps plain messages unchanged", () => {
     expect(errorText("plain failure", "zh")).toBe("plain failure");
+  });
+
+  it("localizes kinds that carry an RPC method prefix", () => {
+    expect(errorText("jenkins/jobs: unauthorized: 401", "zh")).toBe(
+      "认证失败，请检查用户名与 API Token",
+    );
+    expect(errorText("jenkins/trigger: read_only: blocked", "zh")).toBe("当前连接处于只读模式");
+  });
+
+  it("shows the Jenkins reason for rejected requests", () => {
+    expect(
+      errorText("jenkins/createJob: rejected: A job already exists with the name 'demo'", "zh"),
+    ).toBe("请求被 Jenkins 拒绝：A job already exists with the name 'demo'");
+    expect(errorText("jenkins/createJob: rejected: unsafe character", "en")).toBe(
+      "Jenkins rejected the request: unsafe character",
+    );
+  });
+
+  it("keeps the detail when a config error explains the problem", () => {
+    expect(errorText("invalid_config: name must not contain *", "zh")).toContain(
+      "name must not contain *",
+    );
+    expect(errorText("invalid_config: host is empty", "en")).toContain("host is empty");
   });
 });

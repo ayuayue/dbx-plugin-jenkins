@@ -174,6 +174,47 @@ CRUD view renamed: CRUD-View-Renamed "updated by dbx" demo,param-demo
 CRUD cleanup ok
 ```
 
+## 5.3 新建任务 400 的页面结构（0.4.2）
+
+用与插件一致的请求（`POST /createItem?name=…` + `Content-Type: text/xml` + Cookie session + `Jenkins-Crumb`）实测 2.586：
+
+| 场景 | HTTP | 页面里的原因 |
+| --- | --- | --- |
+| 名字重复 | 400 | `A job already exists with the name ‘x’` |
+| 名字含 `*` `:` `<` `>` `\|` `&` `;` `!` `@` `$` `^` `[` `]` | 400 | `‘x’ is an unsafe character` |
+| 空名字 | 400 | `No name is specified` |
+| 名字含 `"` | **500** | Oops 页，仅 `Logging ID=…` |
+| 中文 / 空格 / 文件夹内新建 | 200 | — |
+
+页面结构（注意 `<p>` **没有闭合标签**）：
+
+```html
+<!-- start of main content ⇒
+--><h1>Error</h1><p>A job already exists with the name ‘probe-2’<!--
+⇐ end of main content
+-->
+```
+
+500 的 Oops 页结构完全不同，没有可读原因：
+
+```html
+<h1 …><img src="…/rage.svg"><span …> Oops!</span></h1>
+<div id="error-description"><h2 …>A problem occurred while processing the request</h2>
+<p …>Logging ID=44a27356-d701-4205-91ca-ee512fff33c2</div>
+```
+
+修复后 sidecar 返回：
+
+```text
+rejected: A job already exists with the name ‘probe-2’
+invalid_config: name must not contain "*"
+invalid_config: name must not contain "\""
+```
+
+- 400（非 401/403/404）归 `rejected`，message 为提取出的原因；
+- 500 无原因时保留通用提示并附 `Logging ID`；
+- 名称含 `"` 等 14 个字符在前端与后端先行拦截，不再落到 Jenkins。
+
 ## 6. E2E 发现并修复的问题
 **`computer.idle` 是布尔值，不是空闲执行器数量。**
 

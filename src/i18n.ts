@@ -177,6 +177,7 @@ const en = {
   pickAtLeastOneJob: "Select at least one job.",
   deleteTarget: "Delete {name}?",
   readOnlyManageHint: "Turn off read-only mode on this connection to manage jobs and views.",
+  closeToast: "Dismiss notification",
 } as const;
 
 const zh: Record<keyof typeof en, string> = {
@@ -348,6 +349,7 @@ const zh: Record<keyof typeof en, string> = {
   pickAtLeastOneJob: "请至少选择一个任务。",
   deleteTarget: "删除 {name}？",
   readOnlyManageHint: "请关闭该连接的只读模式后再管理任务和视图。",
+  closeToast: "关闭提示",
 };
 
 export type MessageKey = keyof typeof en;

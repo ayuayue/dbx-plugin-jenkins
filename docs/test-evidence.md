@@ -428,3 +428,106 @@ UI 接线：`createJob` 先静默刷新列表，再按 `needsJoinView` 读 `view
 - `Stages`：`wfapi/describe` 解析、矩阵列顺序、缺失 stage 留空、平均耗时（失败/进行中排除）、提交数、404 → `stages_unavailable`、部分构建无阶段时降级；变更集同时解析 `changeSet`（Freestyle）与 `changeSets`（Pipeline），按 commitId 去重，矩阵内单条信息截断 200 rune。
 - `CRUD`：名称校验（路径分隔符/`..`/控制字符/255 上限）；任务 config.xml 路径；自由风格与 Pipeline 最小模板（脚本转义）；文件夹内创建；`doRename`；`doDelete`；ListView `createView`（name/mode 在 form 与 json 各一份、7 列默认配置）；视图 config.xml 读写；9 个写入口只读拦截；XML 保守改写保留 SCM/构建步骤/comparator/columns；增量更新只提交变化字段；HTML 错误页摘要。
 - 前端：错误码 → 中英文提示、未知错误码保留 detail；状态色调、时长/时间格式、日志尾部截断、匹配计数、大小写高亮；表单名称校验、载荷裁剪、差异字段、任务列表集合比较、删除确认精确匹配。
+
+## 新增任务 400 可读原因（0.4.2）
+
+红（先写测试，6 项 Go + 5 项前端全部失败）：
+
+```
+--- FAIL: TestAPIErrorExtractsSendErrorPage
+    kind = "request_failed", want rejected
+    message = "Jenkins returned an HTML error page (HTTP 400); check the Jenkins server log"
+--- FAIL: TestAPIErrorExtractsDuplicateName
+--- FAIL: TestAPIErrorStopsAtParagraphBoundary
+--- FAIL: TestAPIErrorUnescapesHTMLEntities
+--- FAIL: TestAPIErrorKeepsLoggingID
+--- FAIL: TestValidateNameRejectsUnsafeCharacters   (14 个字符全部放行)
+```
+
+```
+ FAIL  src/lib/errors.test.ts > errorKind > reads the kind after an RPC method prefix
+ FAIL  src/lib/errors.test.ts > errorText > localizes kinds that carry an RPC method prefix
+ FAIL  src/lib/errors.test.ts > errorText > shows the Jenkins reason for rejected requests
+ FAIL  src/lib/errors.test.ts > errorText > keeps the detail when a config error explains the problem
+ FAIL  src/lib/forms.test.ts > validateName > rejects characters Jenkins refuses
+ Tests  5 failed | 28 passed (33)
+```
+
+绿：
+
+```
+ok  github.com/nixing178/dbx-plugin-jenkins/internal/jenkins
+ok  github.com/nixing178/dbx-plugin-jenkins/internal/rpc
+```
+
+```
+ ✓ src/lib/errors.test.ts (10 tests)
+ ✓ src/lib/forms.test.ts (23 tests)
+ Test Files  12 passed (12)
+      Tests  153 passed (153)
+```
+
+`pnpm typecheck` 无报错；`pnpm build` 通过（`ui/index.html` 202.73 kB）；`check-version` 0.4.2 四处一致。
+
+真实 Jenkins 2.586（sidecar 直连，18081 `/jenkins`）：
+
+```
+PASS 重名（Jenkins 返回 400，需透出原因）
+     -> rejected: A job already exists with the name ‘probe-2’
+PASS 名字含 *（本地拦截）        -> invalid_config: name must not contain "*"
+PASS 名字含 "（本地拦截，避免 500） -> invalid_config: name must not contain "\""
+PASS 中文名                     -> {"fullName":"中文任务-crud","success":true}
+PASS 文件夹内新建                -> {"fullName":"probe-folder2/child-b","success":true}
+PASS 文件夹内重名                -> rejected: A job already exists with the name ‘child-b’
+```
+
+覆盖：
+
+- `newAPIError`：400（非 401/403/404）→ `rejected`；HTML 页提取 `<h1>Error</h1><p>原因`（`<p>` 未闭合，按 `</p>`/`<!--`/`</div>`/`<h1`/`<div` 截断）；HTML 实体反转义（`&lt;` → `<`）；无原因的 500 Oops 页保留通用提示并附 `Logging ID=`。
+- `ValidateName`：拒绝 `* : < > | & ; ! @ $ ^ [ ] "`；放行 `( ) { } = + , ' ~ \` - 。` 空格与中文。
+- `errorKind` / `errorText`：识别 `jenkins/createJob: rejected: …` 形式的方法前缀；`rejected` 与 `invalid_config` 把 detail 拼在本地化文案后；未知 kind 仍只保留 detail。
+- `validateName`（前端）：与后端字符集一致。
+- `JobEditor.submit`：`busy` 期间直接返回，避免重复提交导致第二次重名 400。
+
+## 操作提示改 toast（2026-10-22）
+
+顶部内联绿条（`.banner.notice`）改为右上角浮层 toast：`src/lib/toast.ts`（队列：4s 过期、同文案去重重置计时、最多 3 条、点击关闭）、`src/components/ToastHost.vue`（浮层渲染）、App.vue 的 14 处 `showNotice` 全部改走 `showToast`。错误横幅 `.banner.error` 保留（需要常驻 + 重试按钮）。
+
+红（`toast.ts` 未创建时）：
+
+```
+❯ src/lib/toast.test.ts (0 test)
+Error: Failed to load url ./toast (resolved id: ./toast) ... Does the file exist?
+ Test Files  1 failed | 12 passed (13)
+      Tests  153 passed (153)
+```
+
+第一次写实现后仍红 1 例——不是实现缺陷，是测试过度约束了「两条同时到期各回调一次」：
+
+```
+FAIL  src/lib/toast.test.ts > createToastQueue > notifies subscribers on push, drop and expiry
+AssertionError: expected "spy" to be called 3 times, but got 4 times
+      Tests  1 failed | 165 passed (166)
+```
+
+绿：
+
+```
+ ✓ src/lib/toast.test.ts (13 tests)
+ Test Files  13 passed (13)
+      Tests  166 passed (166)
+```
+
+`pnpm typecheck` 无报错；`pnpm build` 通过（`ui/index.html` 213.76 kB）；`check-version` 0.4.2 四处一致。
+
+UI 目视（Chrome headless 截图，`pnpm dev` + `/toast-preview.html`）：
+
+- `docs/toast-preview.png`：浅色主题，三条堆叠（success 绿左条 / info 蓝左条 / 长文案换行），浮层压在 56px 顶栏下方、不挤压列表。
+- `docs/toast-preview-dark.png`：深色主题，卡片随 `--panel/--text` 变量翻转，文字对比正常。
+
+覆盖点：
+
+- 入队返回 id、默认 success、info 保留 tone、文本 trim、空文本返回 null。
+- 4s 自动过期；同文案重复 push 不叠加且重置倒计时；过期后可再次入队。
+- 超过 3 条挤掉最早一条；`dismiss` 立即移除并清定时器；未知 id 不影响其它条目。
+- `clear()` 清空并取消所有计时器；`onChange` 在入队/挤出/过期/清空时回调。

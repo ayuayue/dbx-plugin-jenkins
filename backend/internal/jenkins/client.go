@@ -7,18 +7,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	userAgent   = "dbx-jenkins-plugin/0.4.1"
+	userAgent   = "dbx-jenkins-plugin/0.4.3"
 	maxJSONBody = 8 << 20
 )
 
@@ -416,6 +418,9 @@ func newAPIError(status int, body []byte) *APIError {
 		kind = ErrNotFound
 	case status >= 500:
 		kind = ErrServer
+	case status >= 400:
+		// 其余 4xx 是 Jenkins 明确拒绝（重名、非法字符等），原因可读。
+		kind = ErrRejected
 	}
 
 	message := strings.TrimSpace(string(body))
@@ -423,16 +428,79 @@ func newAPIError(status int, body []byte) *APIError {
 	case message == "":
 		message = http.StatusText(status)
 	case looksLikeHTML(message):
-		// Jenkins 的 500 常返回整页 HTML，原样透传对用户没有意义。
-		message = fmt.Sprintf(
-			"Jenkins returned an HTML error page (HTTP %d); check the Jenkins server log",
-			status,
-		)
+		message = describeHTMLError(status, message)
 	}
 	if len(message) > 300 {
 		message = message[:300]
 	}
 	return &APIError{Kind: kind, StatusCode: status, Message: message}
+}
+
+var (
+	// Jenkins 的 sendError 页面：<h1>Error</h1><p>原因。
+	// 注意 <p> 没有闭合标签，必须按注释/相邻块级标签截断。
+	sendErrorPattern = regexp.MustCompile(
+		`(?is)<h1[^>]*>\s*Error\s*</h1>\s*<p[^>]*>(.*?)(?:</p>|<!--|</div>|<h1|<div|$)`,
+	)
+	// 500 的 Oops 页面：<div id="error-description">…<h2>通用描述</h2><p>Logging ID=…
+	oopsPattern = regexp.MustCompile(
+		`(?is)<div[^>]*id=["']error-description["'][^>]*>.*?<h2[^>]*>(.*?)</h2>`,
+	)
+	loggingIDPattern = regexp.MustCompile(`Logging ID=([0-9a-fA-F]{8,}(?:-[0-9a-fA-F-]{4,})*)`)
+	htmlTagPattern   = regexp.MustCompile(`<[^>]*>`)
+)
+
+// describeHTMLError 从 Jenkins 的 HTML 错误页里取出可读原因。
+// 取不到原因时退回通用提示；能取到 Logging ID 就带上，方便查服务端日志。
+func describeHTMLError(status int, page string) string {
+	if reason := jenkinsErrorReason(page); reason != "" {
+		return reason
+	}
+	message := fmt.Sprintf(
+		"Jenkins returned an HTML error page (HTTP %d); check the Jenkins server log",
+		status,
+	)
+	if id := loggingID(page); id != "" {
+		message += " (" + id + ")"
+	}
+	return message
+}
+
+// jenkinsErrorReason 只认「明确的业务原因」，不拿 500 Oops 页的通用描述当原因。
+func jenkinsErrorReason(page string) string {
+	if match := sendErrorPattern.FindStringSubmatch(page); match != nil {
+		if reason := normalizeHTMLText(match[1]); reason != "" {
+			return reason
+		}
+	}
+	if match := oopsPattern.FindStringSubmatch(page); match != nil {
+		reason := normalizeHTMLText(match[1])
+		if reason != "" && !isGenericServerError(reason) {
+			return reason
+		}
+	}
+	return ""
+}
+
+func loggingID(page string) string {
+	match := loggingIDPattern.FindStringSubmatch(page)
+	if match == nil {
+		return ""
+	}
+	return "Logging ID=" + match[1]
+}
+
+func isGenericServerError(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "problem occurred") ||
+		strings.Contains(lower, "internal server error")
+}
+
+// normalizeHTMLText 先剥标签再反转义，避免反转义出的 "<" 被误当成标签。
+func normalizeHTMLText(fragment string) string {
+	text := htmlTagPattern.ReplaceAllString(fragment, " ")
+	text = html.UnescapeString(text)
+	return strings.Join(strings.Fields(text), " ")
 }
 
 func looksLikeHTML(text string) bool {

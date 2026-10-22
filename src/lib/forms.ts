@@ -3,7 +3,8 @@ export type JobKind = "freestyle" | "pipeline";
 export type NameErrorKey = "nameRequired" | "nameInvalid";
 
 const MAX_NAME_LENGTH = 255;
-const INVALID_NAME_CHARS = /[/\\?#%]/;
+// Jenkins NameValidator 拒绝的字符（2.586 实测），其中 " 会让 Jenkins 直接返回 500。
+const INVALID_NAME_CHARS = /[/\\?#%*:<>|&;!@$^\[\]"]/;
 
 /** 与后端 ValidateName 保持一致：前端先拦一层，后端仍会二次校验。 */
 export function validateName(name: string): NameErrorKey | null {

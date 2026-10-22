@@ -36,6 +36,35 @@ describe("validateName", () => {
     expect(validateName("a".repeat(255))).toBeNull();
     expect(validateName("a".repeat(256))).toBe("nameInvalid");
   });
+
+  // 以下字符在真实 Jenkins 2.586 上实测返回 400 "is an unsafe character"（引号是 500），
+  // 必须在前端先拦住，否则用户只会看到一条无法定位的错误。
+  it("rejects characters Jenkins refuses", () => {
+    for (const char of [
+      "*",
+      ":",
+      "<",
+      ">",
+      "|",
+      "&",
+      ";",
+      "!",
+      "@",
+      "$",
+      "^",
+      "[",
+      "]",
+      '"',
+    ]) {
+      expect(validateName(`a${char}b`)).toBe("nameInvalid");
+    }
+  });
+
+  it("accepts characters Jenkins allows", () => {
+    for (const char of ["(", ")", "{", "}", "=", "+", ",", "'", "~", "`", "-", "。"]) {
+      expect(validateName(`a${char}b`)).toBeNull();
+    }
+  });
 });
 
 describe("buildCreateJobPayload", () => {

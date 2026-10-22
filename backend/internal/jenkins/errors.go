@@ -12,6 +12,7 @@ const (
 	ErrForbidden         ErrorKind = "forbidden"
 	ErrNotFound          ErrorKind = "not_found"
 	ErrRequest           ErrorKind = "request_failed"
+	ErrRejected          ErrorKind = "rejected"
 	ErrServer            ErrorKind = "server_error"
 	ErrTimeout           ErrorKind = "timeout"
 	ErrNetwork           ErrorKind = "network"

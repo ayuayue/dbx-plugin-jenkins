@@ -32,6 +32,10 @@ type ListViewConfig struct {
 	Recurse      bool     `json:"recurse"`
 }
 
+// unsafeNameChars 是 Jenkins NameValidator 拒绝的字符（2.586 实测）。
+// 其中 " 会让 Jenkins 返回 500，其余返回 400 "is an unsafe character"。
+const unsafeNameChars = `/\?#%*:<>|&;!@$^[]"`
+
 // ValidateName 校验任务/视图名称：Jenkins 把它们当作路径段和目录名。
 func ValidateName(name string) error {
 	trimmed := strings.TrimSpace(name)
@@ -47,10 +51,12 @@ func ValidateName(name string) error {
 	if strings.Contains(trimmed, "..") {
 		return &APIError{Kind: ErrInvalidConfig, Message: `name must not contain ".."`}
 	}
-	if strings.ContainsAny(trimmed, `/\?#%`) {
-		return &APIError{
-			Kind:    ErrInvalidConfig,
-			Message: `name must not contain / \ ? # %`,
+	for _, char := range trimmed {
+		if strings.ContainsRune(unsafeNameChars, char) {
+			return &APIError{
+				Kind:    ErrInvalidConfig,
+				Message: fmt.Sprintf("name must not contain %q", string(char)),
+			}
 		}
 	}
 	for _, char := range trimmed {
