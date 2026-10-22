@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countMatches, highlightSegments, tailLines } from "./console";
+import { countMatches, highlightSegments, tailLines, trimLogTail } from "./console";
 
 describe("tailLines", () => {
   it("splits lines and drops a trailing newline", () => {
@@ -10,6 +10,26 @@ describe("tailLines", () => {
   it("keeps only the last N lines", () => {
     expect(tailLines("1\n2\n3\n4", 2)).toEqual(["3", "4"]);
     expect(tailLines("1\n2", 10)).toEqual(["1", "2"]);
+  });
+});
+
+describe("trimLogTail", () => {
+  it("leaves short logs untouched", () => {
+    expect(trimLogTail("a\nb\n", 100)).toBe("a\nb\n");
+    expect(trimLogTail("", 10)).toBe("");
+  });
+
+  it("treats a non-positive limit as unlimited", () => {
+    expect(trimLogTail("a\nb", 0)).toBe("a\nb");
+  });
+
+  it("keeps the tail and drops the partial first line", () => {
+    expect(trimLogTail("aaa\nbbb\nccc\n", 8)).toBe("ccc\n");
+    expect(trimLogTail("aaa\nbbb\n", 7)).toBe("bbb\n");
+  });
+
+  it("falls back to the plain tail when there is no line break", () => {
+    expect(trimLogTail("abcdefghij", 4)).toBe("ghij");
   });
 });
 

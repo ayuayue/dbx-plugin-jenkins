@@ -10,6 +10,7 @@
   --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
   --success: #1a9e6d;
   --danger: #d64545;
+  --warning: #b6791f;
   --radius: var(--radius-md, 12px);
   --radius-sm: var(--radius-sm, 8px);
   --font: var(--font-sans, "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif);
@@ -25,6 +26,7 @@
   --muted: #9aa3b2;
   --border: #2b303a;
   --accent-soft: color-mix(in srgb, var(--accent) 18%, transparent);
+  --warning: #e0a04a;
 }
 
 * {

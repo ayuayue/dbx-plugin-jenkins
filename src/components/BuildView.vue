@@ -10,11 +10,13 @@ defineProps<{
   jobFullName: string;
   readOnly: boolean;
   locale: "zh" | "en";
+  autoRefreshing?: boolean;
 }>();
 
 const emit = defineEmits<{
   back: [];
   stop: [number: number];
+  refresh: [];
 }>();
 </script>
 
@@ -35,6 +37,13 @@ const emit = defineEmits<{
         </p>
       </div>
       <div class="actions">
+        <span v-if="autoRefreshing" class="auto-refresh">
+          <span class="pulse" aria-hidden="true"></span>
+          {{ t("autoRefreshing") }}
+        </span>
+        <button type="button" class="ghost" @click="emit('refresh')">
+          {{ t("refresh") }}
+        </button>
         <button
           v-if="build.building && !readOnly"
           type="button"
@@ -166,6 +175,44 @@ h1 {
   background: transparent;
   color: var(--danger);
   font-weight: 600;
+}
+
+.ghost {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 13px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.auto-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--success);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: auto-refresh-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes auto-refresh-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .status-pill {

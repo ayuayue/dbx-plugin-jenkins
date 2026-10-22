@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BuildSummary, StageBuildInfo, StageInfo, StageMatrix } from "../types";
+import type { BuildDetail, BuildSummary, StageBuildInfo, StageInfo, StageMatrix } from "../types";
 import {
   AUTO_REFRESH_INTERVAL_MS,
   PENDING_BUILD_TIMEOUT_MS,
+  POLL_TIMEOUT_MS,
+  QUEUE_AUTO_REFRESH_INTERVAL_MS,
   STAGE_AUTO_REFRESH_INTERVAL_MS,
   createAutoRefresher,
   createPendingBuild,
@@ -10,6 +12,8 @@ import {
   hasNewBuild,
   hasRunningBuild,
   hasRunningStage,
+  shouldPollBuildDetail,
+  shouldRefreshJobsAfterPending,
 } from "./refresh";
 
 function build(number: number, overrides: Partial<BuildSummary> = {}): BuildSummary {
@@ -22,6 +26,18 @@ function build(number: number, overrides: Partial<BuildSummary> = {}): BuildSumm
     displayName: `#${number}`,
     causes: null,
     status: "success",
+    ...overrides,
+  };
+}
+
+function buildDetail(overrides: Partial<BuildDetail> = {}): BuildDetail {
+  return {
+    ...build(12),
+    estimatedDuration: 1000,
+    fullDisplayName: "demo #12",
+    url: "https://jenkins.example/job/demo/12/",
+    changeSet: null,
+    artifacts: null,
     ...overrides,
   };
 }
@@ -118,10 +134,48 @@ describe("hasRunningStage", () => {
   });
 });
 
+describe("shouldPollBuildDetail", () => {
+  it("returns false for a missing build", () => {
+    expect(shouldPollBuildDetail(null)).toBe(false);
+    expect(shouldPollBuildDetail(undefined)).toBe(false);
+  });
+
+  it("polls while the build is running", () => {
+    expect(
+      shouldPollBuildDetail(buildDetail({ building: true, status: "building" })),
+    ).toBe(true);
+  });
+
+  it("detects the building status without the flag", () => {
+    expect(
+      shouldPollBuildDetail(buildDetail({ building: false, status: "building" })),
+    ).toBe(true);
+  });
+
+  it("stops once the build finished", () => {
+    expect(
+      shouldPollBuildDetail(buildDetail({ building: false, status: "success" })),
+    ).toBe(false);
+    expect(
+      shouldPollBuildDetail(buildDetail({ building: false, status: "failure" })),
+    ).toBe(false);
+  });
+});
+
 describe("refresh intervals", () => {
   it("keeps the build list faster than the stage view", () => {
     expect(AUTO_REFRESH_INTERVAL_MS).toBe(3000);
     expect(STAGE_AUTO_REFRESH_INTERVAL_MS).toBe(5000);
+  });
+
+  it("keeps poll requests on a shorter timeout than manual loads", () => {
+    expect(POLL_TIMEOUT_MS).toBe(15_000);
+    expect(POLL_TIMEOUT_MS).toBeLessThan(STAGE_AUTO_REFRESH_INTERVAL_MS * 6);
+  });
+
+  it("polls the queue at a moderate cadence", () => {
+    expect(QUEUE_AUTO_REFRESH_INTERVAL_MS).toBe(5000);
+    expect(QUEUE_AUTO_REFRESH_INTERVAL_MS).toBeGreaterThan(AUTO_REFRESH_INTERVAL_MS);
   });
 });
 
@@ -272,6 +326,130 @@ describe("createAutoRefresher", () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(task).not.toHaveBeenCalled();
     expect(refresher.active).toBe(false);
+  });
+});
+
+describe("createAutoRefresher failure guard", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("stops once consecutive failures reach the limit", async () => {
+    const task = vi.fn<() => Promise<void>>().mockRejectedValue(new Error("boom"));
+    const onPaused = vi.fn();
+    const refresher = createAutoRefresher({
+      intervalMs: 1000,
+      task,
+      maxConsecutiveFailures: 2,
+      onPaused,
+    });
+
+    refresher.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(task).toHaveBeenCalledTimes(1);
+    expect(refresher.active).toBe(true);
+    expect(onPaused).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(task).toHaveBeenCalledTimes(2);
+    expect(refresher.active).toBe(false);
+    expect(onPaused).toHaveBeenCalledWith("failures");
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(task).toHaveBeenCalledTimes(2);
+  });
+
+  it("resets the failure count after a successful run", async () => {
+    const task = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("boom"));
+    const onPaused = vi.fn();
+    const refresher = createAutoRefresher({
+      intervalMs: 1000,
+      task,
+      maxConsecutiveFailures: 3,
+      onPaused,
+    });
+
+    refresher.start();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(task).toHaveBeenCalledTimes(4);
+    expect(refresher.active).toBe(true);
+    expect(onPaused).not.toHaveBeenCalled();
+
+    refresher.stop();
+  });
+
+  it("keeps polling forever when no limit is configured", async () => {
+    const task = vi.fn<() => Promise<void>>().mockRejectedValue(new Error("boom"));
+    const refresher = createAutoRefresher({ intervalMs: 1000, task });
+
+    refresher.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(task).toHaveBeenCalledTimes(10);
+    expect(refresher.active).toBe(true);
+
+    refresher.stop();
+  });
+});
+
+describe("createAutoRefresher trigger", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("runs immediately and resets the countdown", async () => {
+    const task = vi.fn(async () => {});
+    const refresher = createAutoRefresher({ intervalMs: 3000, task });
+
+    refresher.start();
+    await vi.advanceTimersByTimeAsync(2000);
+    refresher.trigger();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(task).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(task).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(task).toHaveBeenCalledTimes(2);
+
+    refresher.stop();
+  });
+
+  it("does nothing on an inactive refresher", async () => {
+    const task = vi.fn(async () => {});
+    const refresher = createAutoRefresher({ intervalMs: 1000, task });
+
+    refresher.trigger();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(task).not.toHaveBeenCalled();
+    expect(refresher.active).toBe(false);
+  });
+});
+
+describe("shouldRefreshJobsAfterPending", () => {
+  it("refreshes once the new build showed up", () => {
+    expect(shouldRefreshJobsAfterPending("settled")).toBe(true);
+  });
+
+  it("refreshes when the tracking window expired", () => {
+    expect(shouldRefreshJobsAfterPending("expired")).toBe(true);
+  });
+
+  it("skips while still watching or after a job switch", () => {
+    expect(shouldRefreshJobsAfterPending("watching")).toBe(false);
+    expect(shouldRefreshJobsAfterPending("stale")).toBe(false);
   });
 });
 

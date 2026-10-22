@@ -73,16 +73,20 @@ export const jenkinsApi = {
     return invoke<{ views: ViewInfo[] }>("jenkins/views", {}, 20_000);
   },
 
-  job(job: string): Promise<JobDetail> {
-    return invoke<JobDetail>("jenkins/job", { job });
+  /**
+   * 任务详情。`timeoutMs` 供轮询传更短的超时：
+   * 轮询是串行链，单轮挂太久会让后续轮次全部停摆。
+   */
+  job(job: string, timeoutMs = 30_000): Promise<JobDetail> {
+    return invoke<JobDetail>("jenkins/job", { job }, timeoutMs);
   },
 
-  builds(job: string, limit = 20): Promise<{ builds: BuildSummary[] }> {
-    return invoke<{ builds: BuildSummary[] }>("jenkins/builds", { job, limit });
+  builds(job: string, limit = 20, timeoutMs = 30_000): Promise<{ builds: BuildSummary[] }> {
+    return invoke<{ builds: BuildSummary[] }>("jenkins/builds", { job, limit }, timeoutMs);
   },
 
-  build(job: string, number: number): Promise<BuildDetail> {
-    return invoke<BuildDetail>("jenkins/build", { job, number });
+  build(job: string, number: number, timeoutMs = 30_000): Promise<BuildDetail> {
+    return invoke<BuildDetail>("jenkins/build", { job, number }, timeoutMs);
   },
 
   console(job: string, number: number, start: number): Promise<ConsoleChunk> {
@@ -105,8 +109,8 @@ export const jenkinsApi = {
     return invoke<Overview>("jenkins/overview", {}, 30_000);
   },
 
-  queue(): Promise<{ items: QueueItem[] }> {
-    return invoke<{ items: QueueItem[] }>("jenkins/queue", {}, 30_000);
+  queue(timeoutMs = 30_000): Promise<{ items: QueueItem[] }> {
+    return invoke<{ items: QueueItem[] }>("jenkins/queue", {}, timeoutMs);
   },
 
   cancelQueue(id: number): Promise<{ success: boolean }> {
@@ -117,8 +121,8 @@ export const jenkinsApi = {
     return invoke<{ nodes: NodeInfo[] }>("jenkins/nodes", {}, 30_000);
   },
 
-  stages(job: string, limit = 10): Promise<StageMatrix> {
-    return invoke<StageMatrix>("jenkins/stages", { job, limit }, 120_000);
+  stages(job: string, limit = 10, timeoutMs = 120_000): Promise<StageMatrix> {
+    return invoke<StageMatrix>("jenkins/stages", { job, limit }, timeoutMs);
   },
 
   jobConfig(job: string): Promise<JobConfigResponse> {

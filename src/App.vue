@@ -19,12 +19,16 @@ import { errorText } from "./lib/errors";
 import { createToastQueue, type ToastItem, type ToastTone } from "./lib/toast";
 import {
   AUTO_REFRESH_INTERVAL_MS,
+  POLL_TIMEOUT_MS,
+  QUEUE_AUTO_REFRESH_INTERVAL_MS,
   STAGE_AUTO_REFRESH_INTERVAL_MS,
   createAutoRefresher,
   createPendingBuild,
   evaluatePendingBuild,
   hasRunningBuild,
   hasRunningStage,
+  shouldPollBuildDetail,
+  shouldRefreshJobsAfterPending,
   type AutoRefresher,
   type PendingBuild,
 } from "./lib/refresh";
@@ -84,6 +88,8 @@ const loadingBuilds = ref(false);
 const loadingView = ref(false);
 const showParams = ref(false);
 const errorMessage = ref("");
+/** 连续刷新失败被护栏暂停时置位，用独立提示条引导手动恢复。 */
+const refreshPaused = ref(false);
 /** 操作提示改为浮层 toast：只占视觉，不挤压页面布局。 */
 const toasts = ref<ToastItem[]>([]);
 const toastQueue = createToastQueue({
@@ -129,8 +135,14 @@ const isPipeline = computed(() =>
 /** 刚触发、还没在构建列表里出现的构建；存在时构建列表保持自动刷新。 */
 const pendingBuild = ref<PendingBuild | null>(null);
 
-/** 当前视图是否需要自动刷新：构建列表有构建中 / 刚触发构建，或阶段视图有进行中的构建/阶段。 */
-const autoRefreshMode = computed<"builds" | "stages" | null>(() => {
+type AutoRefreshMode = "builds" | "stages" | "build" | "queue";
+
+/** 当前视图是否需要自动刷新：构建详情在跑、构建列表有构建中/刚触发、阶段有进行中，或队列页常驻。 */
+const autoRefreshMode = computed<AutoRefreshMode | null>(() => {
+  if (view.value === "build" && shouldPollBuildDetail(selectedBuild.value)) {
+    return "build";
+  }
+  if (view.value === "queue") return "queue";
   if (view.value === "jobs" && selectedJob.value) {
     if (hasRunningBuild(builds.value)) return "builds";
     if (pendingBuild.value?.job === selectedJob.value.fullName) return "builds";
@@ -148,6 +160,7 @@ let autoRefresher: AutoRefresher | null = null;
 let jobsToken = 0;
 let selectToken = 0;
 let stageToken = 0;
+let buildToken = 0;
 
 function setError(error: unknown): void {
   errorMessage.value = errorText(describeError(error), locale.value);
@@ -353,35 +366,46 @@ async function refreshJob(silent = false): Promise<void> {
     await loadJobs(folder.value);
     return;
   }
-  await selectJob({ fullName: selectedJob.value.fullName }, silent);
+  // 先重置倒计时再发请求：否则请求窗口内还会排一轮，两个请求撞在一起。
   autoRefresher?.restart();
+  await selectJob({ fullName: selectedJob.value.fullName }, silent);
 }
 
 async function openBuild(number: number, rememberReturn = true): Promise<void> {
   if (!selectedJob.value) return;
+  const job = selectedJob.value.fullName;
+  const token = ++buildToken;
   if (rememberReturn) {
     buildReturnView.value = view.value === "stages" ? "stages" : "jobs";
   }
   loadingBuilds.value = true;
   errorMessage.value = "";
   try {
-    selectedBuild.value = await jenkinsApi.build(selectedJob.value.fullName, number);
+    const detail = await jenkinsApi.build(job, number);
+    if (token !== buildToken) return;
+    selectedBuild.value = detail;
     view.value = "build";
   } catch (error) {
-    setError(error);
+    if (token === buildToken) setError(error);
   } finally {
-    loadingBuilds.value = false;
+    if (token === buildToken) loadingBuilds.value = false;
   }
 }
 
 async function refreshBuild(): Promise<void> {
   if (!selectedBuild.value || !selectedJob.value) return;
   await openBuild(selectedBuild.value.number, false);
+  autoRefresher?.restart();
 }
 
 function closeBuild(): void {
   view.value = buildReturnView.value === "stages" ? "stages" : "jobs";
-  if (view.value === "stages") refreshStages();
+  if (view.value === "stages") {
+    void refreshStages();
+    return;
+  }
+  // 详情页停留期间列表没有轮询，回来补一次静默刷新，避免圆点/构建号停在旧值。
+  void refreshJob(true);
 }
 
 async function loadStages(job: string): Promise<void> {
@@ -412,20 +436,23 @@ function settlePendingBuild(job: string, list: BuildSummary[]): void {
   const status = evaluatePendingBuild(pending, job, list);
   if (status === "watching") return;
   pendingBuild.value = null;
-  // 新构建真正出现后补刷任务列表：此时圆点与 #构建号 才会更新。
-  if (status === "settled") void loadJobs(folder.value, true);
+  // 新构建出现或跟踪超时都要补刷：否则圆点与 #构建号 会停在旧值。
+  if (shouldRefreshJobsAfterPending(status)) void loadJobs(folder.value, true);
 }
 
 /** 静默刷新构建列表 + 任务详情：不置 loading，失败不弹错误。 */
 async function pollBuilds(): Promise<void> {
   const job = selectedJob.value?.fullName;
   if (!job || view.value !== "jobs" || pageHidden()) return;
+  const token = selectToken;
   try {
     const [detail, list] = await Promise.all([
-      jenkinsApi.job(job),
-      jenkinsApi.builds(job, 20),
+      jenkinsApi.job(job, POLL_TIMEOUT_MS),
+      jenkinsApi.builds(job, 20, POLL_TIMEOUT_MS),
     ]);
     if (view.value !== "jobs" || selectedJob.value?.fullName !== job) return;
+    // 期间若手动刷新过，已有更新的一份落了盘，别用旧响应覆盖。
+    if (token !== selectToken) return;
     selectedJob.value = detail;
     builds.value = list.builds;
     settlePendingBuild(job, list.builds);
@@ -440,7 +467,7 @@ async function pollStages(): Promise<void> {
   if (!job || view.value !== "stages" || pageHidden()) return;
   const token = stageToken;
   try {
-    const matrix = await jenkinsApi.stages(job, 10);
+    const matrix = await jenkinsApi.stages(job, 10, POLL_TIMEOUT_MS);
     if (
       token !== stageToken ||
       view.value !== "stages" ||
@@ -454,26 +481,89 @@ async function pollStages(): Promise<void> {
   }
 }
 
+/** 静默刷新构建详情；构建结束后 autoRefreshMode 自然变 null，轮询自动停。 */
+async function pollBuildDetail(): Promise<void> {
+  const job = selectedJob.value?.fullName;
+  const number = selectedBuild.value?.number;
+  if (!job || number === undefined || view.value !== "build" || pageHidden()) return;
+  const token = buildToken;
+  try {
+    const detail = await jenkinsApi.build(job, number, POLL_TIMEOUT_MS);
+    if (token !== buildToken || view.value !== "build") return;
+    if (selectedBuild.value?.number !== number) return;
+    selectedBuild.value = detail;
+  } catch {
+    // 失败保留现有数据，下一轮重试（连续失败由护栏统一处理）。
+  }
+}
+
+/** 静默刷新构建队列：排队项随时进出，固定轮询不看内容。 */
+async function pollQueue(): Promise<void> {
+  if (view.value !== "queue" || pageHidden()) return;
+  try {
+    const result = await jenkinsApi.queue(POLL_TIMEOUT_MS);
+    if (view.value !== "queue") return;
+    queueItems.value = result.items;
+  } catch {
+    // 静默重试。
+  }
+}
+
+/** 连续失败多少次后判定 Jenkins 不可用并暂停轮询。 */
+const AUTO_REFRESH_MAX_FAILURES = 3;
+
 function stopAutoRefresh(): void {
   autoRefresher?.stop();
   autoRefresher = null;
 }
 
-function startAutoRefresh(mode: "builds" | "stages"): void {
+const AUTO_REFRESH_TASKS: Record<AutoRefreshMode, () => Promise<void>> = {
+  builds: pollBuilds,
+  build: pollBuildDetail,
+  stages: pollStages,
+  queue: pollQueue,
+};
+
+const AUTO_REFRESH_INTERVALS: Record<AutoRefreshMode, number> = {
+  builds: AUTO_REFRESH_INTERVAL_MS,
+  build: AUTO_REFRESH_INTERVAL_MS,
+  stages: STAGE_AUTO_REFRESH_INTERVAL_MS,
+  queue: QUEUE_AUTO_REFRESH_INTERVAL_MS,
+};
+
+function startAutoRefresh(mode: AutoRefreshMode): void {
   const refresher = createAutoRefresher({
-    intervalMs:
-      mode === "builds" ? AUTO_REFRESH_INTERVAL_MS : STAGE_AUTO_REFRESH_INTERVAL_MS,
-    task: mode === "builds" ? pollBuilds : pollStages,
+    intervalMs: AUTO_REFRESH_INTERVALS[mode],
+    task: AUTO_REFRESH_TASKS[mode],
     shouldContinue: () => autoRefreshMode.value === mode,
+    maxConsecutiveFailures: AUTO_REFRESH_MAX_FAILURES,
+    onPaused: () => {
+      // 不做自动恢复：Jenkins 不可用时继续打只会刷屏，交给用户手动确认。
+      refreshPaused.value = true;
+    },
   });
   autoRefresher = refresher;
+  refreshPaused.value = false;
   refresher.start();
+}
+
+/** 页面隐藏时停轮询（后台空转无意义），回到前台立即补一轮。 */
+function handleVisibility(): void {
+  if (pageHidden()) {
+    stopAutoRefresh();
+    return;
+  }
+  const mode = autoRefreshMode.value;
+  if (!mode) return;
+  if (!autoRefresher?.active) startAutoRefresh(mode);
+  autoRefresher?.trigger();
 }
 
 watch(autoRefreshMode, (mode, previous) => {
   stopAutoRefresh();
   if (mode) {
-    startAutoRefresh(mode);
+    // 后台不重建轮询：可见时 handleVisibility 会补上并立即跑一轮。
+    if (!pageHidden()) startAutoRefresh(mode);
     return;
   }
   // 构建结束、轮询停止时补一次静默刷新，让列表圆点与构建号收敛到最终状态。
@@ -490,8 +580,8 @@ async function openStages(): Promise<void> {
 
 async function refreshStages(): Promise<void> {
   if (!selectedJob.value) return;
-  await loadStages(selectedJob.value.fullName);
   autoRefresher?.restart();
+  await loadStages(selectedJob.value.fullName);
 }
 
 async function triggerBuild(params: Record<string, unknown> = {}): Promise<void> {
@@ -517,14 +607,19 @@ async function triggerBuild(params: Record<string, unknown> = {}): Promise<void>
 }
 
 async function stopBuild(number: number): Promise<void> {
-  if (!selectedJob.value) return;
+  const job = selectedJob.value?.fullName;
+  if (!job) return;
   if (!window.confirm(t("stopConfirm", { number }))) return;
   try {
-    await jenkinsApi.stop(selectedJob.value.fullName, number);
+    await jenkinsApi.stop(job, number);
     showToast(t("stopSuccess"));
+    // Jenkins 要过一小会儿才把状态改过来；延迟补刷，且只在目标未变时才刷。
     window.setTimeout(() => {
+      if (selectedJob.value?.fullName !== job) return;
       void refreshJob();
-      if (view.value === "build") void refreshBuild();
+      if (view.value === "build" && selectedBuild.value?.number === number) {
+        void refreshBuild();
+      }
     }, 800);
   } catch (error) {
     setError(error);
@@ -827,10 +922,15 @@ async function confirmDelete(): Promise<void> {
 }
 
 async function refreshCurrent(): Promise<void> {
+  // 手动刷新视为用户确认环境已恢复：清暂停提示，必要时重建被护栏停掉的轮询器。
+  refreshPaused.value = false;
+  const mode = autoRefreshMode.value;
+  if (mode && !autoRefresher?.active) startAutoRefresh(mode);
+
   if (view.value === "build") {
     await refreshBuild();
   } else if (view.value === "stages") {
-    refreshStages();
+    void refreshStages();
   } else if (view.value === "overview") {
     await loadOverview();
   } else if (view.value === "queue") {
@@ -873,11 +973,13 @@ onMounted(async () => {
   syncLocale(plugin.locale);
   applyTheme();
   window.addEventListener("dbx-plugin-env", handleEnv);
+  document.addEventListener("visibilitychange", handleVisibility);
   await loadIdentity();
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("dbx-plugin-env", handleEnv);
+  document.removeEventListener("visibilitychange", handleVisibility);
   toastQueue.clear();
   pendingBuild.value = null;
   stopAutoRefresh();
@@ -961,6 +1063,11 @@ onBeforeUnmount(() => {
           <button type="button" @click="loadIdentity">{{ t("retry") }}</button>
         </div>
 
+        <div v-if="refreshPaused" class="banner warn">
+          <span>{{ t("autoRefreshPaused") }}</span>
+          <button type="button" @click="refreshCurrent">{{ t("refresh") }}</button>
+        </div>
+
         <OverviewView
           v-if="view === 'overview'"
           :overview="overview"
@@ -993,7 +1100,7 @@ onBeforeUnmount(() => {
           :locale="locale"
           :auto-refreshing="autoRefreshing"
           @back="view = 'jobs'"
-          @refresh="refreshStages"
+          @refresh="refreshCurrent"
           @open-build="openBuild"
         />
 
@@ -1003,8 +1110,10 @@ onBeforeUnmount(() => {
             :job-full-name="selectedJob.fullName"
             :read-only="readOnly"
             :locale="locale"
+            :auto-refreshing="autoRefreshing"
             @back="closeBuild"
             @stop="stopBuild"
+            @refresh="refreshCurrent"
           />
         </div>
 
@@ -1042,7 +1151,7 @@ onBeforeUnmount(() => {
             @stop="stopLastBuild"
             @open-build="openBuild"
             @open-stages="openStages"
-            @refresh="refreshJob"
+            @refresh="refreshCurrent"
             @edit-job="openEditJob"
             @delete-job="openDeleteJob"
           />
@@ -1270,6 +1379,11 @@ onBeforeUnmount(() => {
 .banner.error {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
+}
+
+.banner.warn {
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--warning);
 }
 
 .banner button {

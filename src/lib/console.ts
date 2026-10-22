@@ -11,6 +11,18 @@ export function tailLines(text: string, max: number): string[] {
   return lines;
 }
 
+/**
+ * 只保留日志尾部 maxChars 个字符，避免长构建把整份日志全留在内存里。
+ * 界面本来就按 tailLines 截断显示，丢头部不影响可见内容；
+ * 按行边界切，避免首行是半行。maxChars <= 0 表示不限制。
+ */
+export function trimLogTail(text: string, maxChars: number): string {
+  if (maxChars <= 0 || text.length <= maxChars) return text;
+  const tail = text.slice(-maxChars);
+  const firstBreak = tail.indexOf("\n");
+  return firstBreak < 0 ? tail : tail.slice(firstBreak + 1);
+}
+
 /** 统计所有行里 query 出现的次数（忽略大小写）。 */
 export function countMatches(lines: string[], query: string): number {
   const needle = query.trim().toLowerCase();

@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { describeError, jenkinsApi } from "../api";
 import { locale, t } from "../i18n";
-import { countMatches, highlightSegments, tailLines } from "../lib/console";
+import { countMatches, highlightSegments, tailLines, trimLogTail } from "../lib/console";
 import { errorText } from "../lib/errors";
 
 const props = defineProps<{
@@ -11,6 +11,10 @@ const props = defineProps<{
 }>();
 
 const MAX_LINES = 5000;
+/** 日志文本内存上限：约 2MB，超出只留尾部（显示本来就只截 5000 行）。 */
+const MAX_TEXT_CHARS = 2_000_000;
+/** 增量拉取间隔。 */
+const POLL_DELAY_MS = 1500;
 
 const text = ref("");
 const nextStart = ref(0);
@@ -23,6 +27,8 @@ const logEl = ref<HTMLElement | null>(null);
 
 let timer: number | undefined;
 let generation = 0;
+/** 正在飞行中的轮次所属 generation，-1 表示空闲；按代际记录，reset 后新轮不受旧请求阻挡。 */
+let inFlight = -1;
 
 const lines = computed(() => tailLines(text.value, MAX_LINES));
 const totalLines = computed(() => {
@@ -39,22 +45,41 @@ function scrollToBottom(): void {
 }
 
 async function poll(current: number): Promise<void> {
+  if (inFlight === current) return;
+  inFlight = current;
   try {
     const chunk = await jenkinsApi.console(props.job, props.number, nextStart.value);
     if (current !== generation) return;
-    if (chunk.text) text.value += chunk.text;
+    if (chunk.text) {
+      text.value = trimLogTail(text.value + chunk.text, MAX_TEXT_CHARS);
+    }
     nextStart.value = chunk.nextStart;
     moreData.value = chunk.moreData;
     error.value = "";
     await nextTick();
     if (follow.value) scrollToBottom();
-    if (chunk.moreData) {
-      timer = window.setTimeout(() => void poll(current), 1500);
+    // 后台不续排：回到前台由 visibilitychange 接着拉，避免后台空转。
+    if (chunk.moreData && !document.hidden) {
+      timer = window.setTimeout(() => void poll(current), POLL_DELAY_MS);
     }
   } catch (caught) {
     if (current !== generation) return;
     error.value = errorText(describeError(caught), locale.value);
+  } finally {
+    if (inFlight === current) inFlight = -1;
   }
+}
+
+/** 页面隐藏时取消已排的下一轮；回到前台且还有增量就立刻续上。 */
+function handleVisibility(): void {
+  if (document.hidden) {
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      timer = undefined;
+    }
+    return;
+  }
+  if (moreData.value && inFlight !== generation) void poll(generation);
 }
 
 function reset(): void {
@@ -98,7 +123,10 @@ function downloadLog(): void {
 
 watch(() => [props.job, props.number], reset, { immediate: true });
 
+onMounted(() => document.addEventListener("visibilitychange", handleVisibility));
+
 onBeforeUnmount(() => {
+  document.removeEventListener("visibilitychange", handleVisibility);
   generation += 1;
   if (timer) window.clearTimeout(timer);
 });

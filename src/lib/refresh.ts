@@ -1,4 +1,4 @@
-import type { BuildSummary, StageMatrix } from "../types";
+import type { BuildDetail, BuildSummary, StageMatrix } from "../types";
 
 /** 构建列表轮询间隔：有构建中时每 3s 刷新一次。 */
 export const AUTO_REFRESH_INTERVAL_MS = 3000;
@@ -6,8 +6,17 @@ export const AUTO_REFRESH_INTERVAL_MS = 3000;
 /** 阶段视图轮询间隔：每次要拉最近 10 次构建的 wfapi，放宽到 5s。 */
 export const STAGE_AUTO_REFRESH_INTERVAL_MS = 5000;
 
+/** 队列轮询间隔：排队项进出比构建状态慢，5s 足够且不压 Jenkins。 */
+export const QUEUE_AUTO_REFRESH_INTERVAL_MS = 5000;
+
 /** 触发构建后跟踪新构建出现的最长时间：排队过久就放弃跟踪，避免无休止轮询。 */
 export const PENDING_BUILD_TIMEOUT_MS = 120_000;
+
+/**
+ * 轮询请求的专用超时：比手动加载短得多。
+ * 轮询是串行链，单轮挂太久会让后续轮次全部停摆，宁可快速失败进下一轮。
+ */
+export const POLL_TIMEOUT_MS = 15_000;
 
 const RUNNING_STAGE_STATUSES = new Set(["in_progress", "building"]);
 
@@ -31,6 +40,14 @@ export function hasRunningStage(matrix: StageMatrix | null | undefined): boolean
       RUNNING_STAGE_STATUSES.has((stage.status ?? "").toLowerCase()),
     );
   });
+}
+
+/** 构建详情页是否需要轮询：只要这一条构建还在跑。 */
+export function shouldPollBuildDetail(
+  build: BuildDetail | null | undefined,
+): boolean {
+  if (!build) return false;
+  return build.building === true || build.status === "building";
 }
 
 /** 触发构建后的跟踪状态：等新构建出现。 */
@@ -85,6 +102,15 @@ export function evaluatePendingBuild(
   return "watching";
 }
 
+/**
+ * 待确认构建结算后是否要补刷任务列表。
+ * 新构建出现（settled）与跟踪超时（expired）都要收敛界面，
+ * 否则排队过久的构建会让左侧圆点与构建号一直停在旧值。
+ */
+export function shouldRefreshJobsAfterPending(status: PendingBuildStatus): boolean {
+  return status === "settled" || status === "expired";
+}
+
 export interface AutoRefresherOptions {
   /** 两轮之间的间隔（毫秒）。 */
   intervalMs: number;
@@ -92,6 +118,13 @@ export interface AutoRefresherOptions {
   task: () => Promise<void> | void;
   /** 每轮结束后判定是否继续；返回 false 则自动停止。 */
   shouldContinue?: () => boolean;
+  /**
+   * 连续失败阈值：达到后自动停止，避免 Jenkins 不可用时无限重试。
+   * 0 或省略表示不限制（保持旧行为）。
+   */
+  maxConsecutiveFailures?: number;
+  /** 因连续失败被自动暂停时回调，供调用方提示用户。 */
+  onPaused?: (reason: "failures") => void;
 }
 
 export interface AutoRefresher {
@@ -99,6 +132,8 @@ export interface AutoRefresher {
   stop(): void;
   /** 重置计时（手动刷新后调用）；未启动时为空操作。 */
   restart(): void;
+  /** 立即执行一轮并重置计时（回到前台时用）；未启动时为空操作。 */
+  trigger(): void;
   readonly active: boolean;
 }
 
@@ -108,9 +143,11 @@ export interface AutoRefresher {
  */
 export function createAutoRefresher(options: AutoRefresherOptions): AutoRefresher {
   const intervalMs = Math.max(250, options.intervalMs);
+  const maxFailures = options.maxConsecutiveFailures ?? 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running = false;
   let generation = 0;
+  let failures = 0;
 
   function clearTimer(): void {
     if (timer !== undefined) {
@@ -129,13 +166,28 @@ export function createAutoRefresher(options: AutoRefresherOptions): AutoRefreshe
     timer = undefined;
     if (!running || current !== generation) return;
 
+    let failed = false;
     try {
       await options.task();
     } catch {
       // 自动刷新失败不打断循环；是否提示由调用方决定。
+      failed = true;
     }
 
     if (!running || current !== generation) return;
+
+    if (failed) {
+      failures += 1;
+      if (maxFailures > 0 && failures >= maxFailures) {
+        running = false;
+        clearTimer();
+        options.onPaused?.("failures");
+        return;
+      }
+    } else {
+      failures = 0;
+    }
+
     if (options.shouldContinue && !options.shouldContinue()) {
       running = false;
       return;
@@ -146,12 +198,14 @@ export function createAutoRefresher(options: AutoRefresherOptions): AutoRefreshe
   function start(): void {
     if (running) return;
     running = true;
+    failures = 0;
     generation += 1;
     schedule(generation);
   }
 
   function stop(): void {
     running = false;
+    failures = 0;
     generation += 1;
     clearTimer();
   }
@@ -163,10 +217,18 @@ export function createAutoRefresher(options: AutoRefresherOptions): AutoRefreshe
     schedule(generation);
   }
 
+  function trigger(): void {
+    if (!running) return;
+    generation += 1;
+    clearTimer();
+    void tick(generation);
+  }
+
   return {
     start,
     stop,
     restart,
+    trigger,
     get active() {
       return running;
     },

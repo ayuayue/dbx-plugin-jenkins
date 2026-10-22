@@ -531,3 +531,109 @@ UI 目视（Chrome headless 截图，`pnpm dev` + `/toast-preview.html`）：
 - 4s 自动过期；同文案重复 push 不叠加且重置倒计时；过期后可再次入队。
 - 超过 3 条挤掉最早一条；`dismiss` 立即移除并清定时器；未知 id 不影响其它条目。
 - `clear()` 清空并取消所有计时器；`onChange` 在入队/挤出/过期/清空时回调。
+
+---
+
+## 2026-10-22 · 自动刷新治理（0.4.3）
+
+范围：`docs/refresh-hardening-plan.md` 的 R1~R10，决策 D1:A / D2:A / D3:A / D4:A / D5:A。
+
+### Step 1 轮询基建（R3/R4/R5）
+
+红（`POLL_TIMEOUT_MS` / 护栏 / `trigger()` 尚未实现）：
+
+```
+ ❯ src/lib/refresh.test.ts (38 tests | 4 failed)
+   × refresh intervals > keeps poll requests on a shorter timeout than manual loads
+     → expected undefined to be 15000
+   × createAutoRefresher failure guard > stops once consecutive failures reach the limit
+     → expected true to be false
+   × createAutoRefresher trigger > runs immediately and resets the countdown
+     → refresher.trigger is not a function
+   × createAutoRefresher trigger > does nothing on an inactive refresher
+     → refresher.trigger is not a function
+      Tests  4 failed | 34 passed (38)
+```
+
+绿：
+
+```
+ ✓ src/lib/refresh.test.ts (38 tests)
+      Tests  38 passed (38)
+```
+
+### Step 2 构建详情轮询（R1）
+
+红：
+
+```
+   × shouldPollBuildDetail > returns false for a missing build
+   × shouldPollBuildDetail > polls while the build is running
+   × shouldPollBuildDetail > detects the building status without the flag
+   × shouldPollBuildDetail > stops once the build finished
+     → shouldPollBuildDetail is not a function
+      Tests  4 failed | 38 passed (42)
+```
+
+绿：`✓ src/lib/refresh.test.ts (42 tests)`。
+
+### Step 3 队列轮询（R2）
+
+红：`expected undefined to be 5000 // QUEUE_AUTO_REFRESH_INTERVAL_MS`（1 failed | 42 passed）。
+绿：`✓ src/lib/refresh.test.ts (43 tests)`。
+
+### Step 4 延迟刷新收敛（R6/R9/R10）
+
+红：
+
+```
+   × shouldRefreshJobsAfterPending > refreshes once the new build showed up
+   × shouldRefreshJobsAfterPending > refreshes when the tracking window expired
+   × shouldRefreshJobsAfterPending > skips while still watching or after a job switch
+     → shouldRefreshJobsAfterPending is not a function
+      Tests  3 failed | 43 passed (46)
+```
+
+绿：`✓ src/lib/refresh.test.ts (46 tests)`，全仓 180 passed。
+
+### Step 5 控制台内存与后台（R8）
+
+红：
+
+```
+ ❯ src/lib/console.test.ts (10 tests | 4 failed)
+   × trimLogTail > leaves short logs untouched
+   × trimLogTail > treats a non-positive limit as unlimited
+   × trimLogTail > keeps the tail and drops the partial first line
+   × trimLogTail > falls back to the plain tail when there is no line break
+     → trimLogTail is not a function
+      Tests  4 failed | 6 passed (10)
+```
+
+绿：`✓ src/lib/console.test.ts (10 tests)`。
+
+### 最终验收
+
+```
+ Test Files  13 passed (13)
+      Tests  184 passed (184)
+```
+
+```
+> node scripts/check-version.mjs && vue-tsc --noEmit && vite build
+[check-version] ok: 0.4.3
+✓ 71 modules transformed.
+ui/index.html  216.89 kB │ gzip: 68.53 kB
+✓ built in 1.69s
+```
+
+新增覆盖点：
+
+- 连续失败达阈值后自动停轮询并回调 `onPaused("failures")`；中间成功一次即清零；未配置阈值时保持旧行为（无限重试）。
+- `trigger()` 立即执行一轮并重置倒计时；未启动时为空操作。
+- `shouldPollBuildDetail`：`building` 真值 / `status=building` / 缺省 / 已结束。
+- `shouldRefreshJobsAfterPending`：settled 与 expired 都补刷，watching 与 stale 不刷。
+- `trimLogTail`：未超限原样返回、超限按行边界留尾、无换行退化为纯尾、非正数视为不限。
+- `QUEUE_AUTO_REFRESH_INTERVAL_MS = 5000`；`POLL_TIMEOUT_MS = 15000`。
+
+无法用纯函数覆盖的行为（已人工审查）：`visibilitychange` 隐藏停轮询/回前台 `trigger()`、`stopBuild` 延迟刷新目标校验、`refreshJob` 的 `restart()` 前置、`pollBuilds` 的 `selectToken` 快照校验、ConsoleView 的 `inFlight` 代际互斥。
