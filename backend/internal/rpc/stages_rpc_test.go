@@ -99,3 +99,62 @@ func TestRPCStagesMissingJob(t *testing.T) {
 		t.Fatalf("error = %+v, want invalid_params", rpcErr)
 	}
 }
+
+// 构建列表的进度条按阶段步进：只查正在跑的那一次构建，别拉整张矩阵。
+func TestRPCBuildStages(t *testing.T) {
+	server := fakeJenkinsStages(t)
+	defer server.Close()
+	service := connectM2(t, server, true)
+
+	result, rpcErr := service.Handle(
+		context.Background(),
+		"jenkins/buildStages",
+		json.RawMessage(`{"connectionId":"conn-1","job":"demo-pipeline","number":35}`),
+	)
+	if rpcErr != nil {
+		t.Fatalf("buildStages error = %+v", rpcErr)
+	}
+	payload := decodeResult[struct {
+		Stages []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"stages"`
+	}](t, result)
+	if len(payload.Stages) != 2 {
+		t.Fatalf("stages = %+v, want 2", payload.Stages)
+	}
+	if payload.Stages[1].Name != "打包构建" || payload.Stages[1].Status != "failed" {
+		t.Errorf("stage = %+v, want 打包构建/failed", payload.Stages[1])
+	}
+}
+
+// 未注册的构建号 → wfapi/describe 404 → stages_unavailable，前端据此回退时长估算。
+func TestRPCBuildStagesUnavailable(t *testing.T) {
+	server := fakeJenkinsStages(t)
+	defer server.Close()
+	service := connectM2(t, server, true)
+
+	_, rpcErr := service.Handle(
+		context.Background(),
+		"jenkins/buildStages",
+		json.RawMessage(`{"connectionId":"conn-1","job":"demo-pipeline","number":999}`),
+	)
+	if rpcErr == nil || rpcErr.Kind != "stages_unavailable" {
+		t.Fatalf("error = %+v, want stages_unavailable", rpcErr)
+	}
+}
+
+func TestRPCBuildStagesBadNumber(t *testing.T) {
+	server := fakeJenkinsStages(t)
+	defer server.Close()
+	service := connectM2(t, server, true)
+
+	_, rpcErr := service.Handle(
+		context.Background(),
+		"jenkins/buildStages",
+		json.RawMessage(`{"connectionId":"conn-1","job":"demo-pipeline","number":0}`),
+	)
+	if rpcErr == nil || rpcErr.Kind != "invalid_params" {
+		t.Fatalf("error = %+v, want invalid_params", rpcErr)
+	}
+}

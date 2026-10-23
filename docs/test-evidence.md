@@ -54,6 +54,9 @@
 | CH2 | 前端浮层纯函数：短哈希 / 首行摘要 / 视口定位与翻转 | `pnpm test` | 11 FAIL / 114 PASS（函数未定义） | 125 PASS（11 files） |
 | CH3 | 浮层视觉与交互：Teleport 不被裁切、贴边翻转、8 条滚动、hover/键盘/Esc/外部点击/详情跳转 | Chrome CDP + headless 截图 | — | `parent=BODY`、`clippedBy=null`、8 条 `listScrollable=true`、底部行翻转 `top=92`、点击详情 `openBuild=38`、Esc/外部点击均关闭 |
 | CH4 | 真实 Jenkins 2.586 Pipeline changelog：`jenkins/stages` 返回 `changes` | 临时 sidecar 探针（已删） | 修复前 `commitCount=0`、`changes=[]` | `commitCount=1`、`changes=[945f1594 / feat(export): 阶段视图变更浮层联调提交 / e2e]` |
+| PG1 | 构建列表进度列：`estimatedDuration` 透出 + 进度算法（构建中百分比 / 超估算封顶 99% / 缺估算走不确定态 / 已完成返回 null） | `go test ./internal/jenkins/ -run TestGetBuildsReadsEstimatedDuration` + `npx vitest run src/lib/progress.test.ts` | Go：`builds[0].EstimatedDuration undefined (BuildSummary has no field)` 编译失败；前端：4 FAIL / 5（空实现返回 null） | Go 全量 OK；vitest 206 PASS（15 files）；`vue-tsc --noEmit` exit 0；`pnpm build` 产物 `ui/index.html` 223 kB（版本 0.4.4 一致） |
+| PG2 | 进度条按阶段步进：单构建 `jenkins/buildStages` + `stageProgress`（已完成一格 / 进行中半格 / 封顶 99 / 空阶段回退时长估算） | `go test ./internal/rpc/ -run TestRPCBuildStages` + `npx vitest run src/lib/progress.test.ts` | Go：`method not found: jenkins/buildStages`（3 FAIL）；前端：`stageProgress is not a function`（5 FAIL / 13） | Go 全量 OK；vitest 214 PASS（15 files）；`vue-tsc --noEmit` exit 0；`pnpm build` 224.07 kB；预览 `#632` 时长估算 63% → 阶段步进 37%，确认阶段优先 |
+| EX1 | 构建执行状态列表（0.5.0）：`jenkins/executors` 槽位明细（空闲占位 / Queue$Executable 等待启动 / 节点离线 / 进度复用时长估算） | `go test ./internal/jenkins/ -run "TestGetExecutors\|TestJobNameFromDisplayName"` + `npx vitest run src/lib/executors.test.ts` | Go：`client.GetExecutors undefined`、`undefined: jobNameFromDisplayName`（build failed）；前端：`./executors` 模块缺失、`hasRunningExecutor is not a function`、`expected ['overview'] to deeply equal ['overview','executors']`（3 files / 4 tests FAIL） | Go 全量 OK；vitest 244 PASS（17 files）；`vue-tsc --noEmit` exit 0；`[check-version] ok: 0.5.0`、`pnpm build` 230.47 kB |
 
 ## 关键红测样本
 
@@ -637,3 +640,402 @@ ui/index.html  216.89 kB │ gzip: 68.53 kB
 - `QUEUE_AUTO_REFRESH_INTERVAL_MS = 5000`；`POLL_TIMEOUT_MS = 15000`。
 
 无法用纯函数覆盖的行为（已人工审查）：`visibilitychange` 隐藏停轮询/回前台 `trigger()`、`stopBuild` 延迟刷新目标校验、`refreshJob` 的 `restart()` 前置、`pollBuilds` 的 `selectToken` 快照校验、ConsoleView 的 `inFlight` 代际互斥。
+
+---
+
+## 2026-10-22 · 自动刷新提示与页面反馈（0.4.4）
+
+范围：`docs/refresh-feedback-plan.md` 的 F1~F6，决策 D1:A / D2:A / D3:A / D4:A / D5:A。
+
+### Step 1 轮询器运行回调
+
+红（`onRunStart` / `onRunEnd` 尚未接）：
+
+```
+ ❯ src/lib/refresh.test.ts (49 tests | 3 failed)
+   × createAutoRefresher run hooks > reports the start and a successful end of each run
+     → expected [] to deeply equal [ 'start', 'ok' ]
+   × createAutoRefresher run hooks > reports a failed run and still counts it towards the guard
+     → expected [] to deeply equal [ false, false ]
+   × createAutoRefresher run hooks > still reports the end of an in-flight run after stop()
+     → expected [] to deeply equal [ true ]
+      Tests  3 failed | 46 passed (49)
+```
+
+绿：`✓ src/lib/refresh.test.ts (49 tests)`。
+
+> 顺带修正：四个 `pollXxx` 原先在内部 `catch` 掉错误，`AutoRefresher` 永远认为成功——护栏的「连续 3 次失败暂停」此前实际不可能触发。现在错误冒泡到轮询器，计数才生效。
+
+### Step 2 刷新状态纯函数
+
+红（模块缺失）：`Failed to load url ./refreshStatus ... Tests no tests`。
+绿：`✓ src/lib/refreshStatus.test.ts (14 tests)`。
+
+### 最终
+
+```
+ Test Files  14 passed (14)
+      Tests  201 passed (201)
+```
+
+```
+[check-version] ok: 0.4.4
+✓ 75 modules transformed.
+ui/index.html  221.19 kB │ gzip: 69.78 kB
+```
+
+新增覆盖点：
+
+- `onRunStart` 在 task 前触发、`onRunEnd(true)` 在成功后触发；失败回调 `false` 且仍计入护栏；`stop()` 时仍在飞的请求也会回调 end，界面不会卡在「请求中」。
+- `refreshBadge`：暂停优先于请求中；无 mode 时返回 idle（即使 paused 残留也不显示）。
+- `formatClockTime`：补零、23 点不溢出、无值返回空串。
+- `diffBuildRows`：首次加载不高亮、新增与状态翻转变更、上一次为空列表时高亮、下一次为空时忽略。
+
+目视（Chrome headless，`pnpm dev` 打开 `/refresh-preview.html`）：
+
+- `docs/refresh-badge-preview.png`：浅色下四态与按钮三态，暂停为琥珀色。
+- `docs/refresh-badge-preview-dark.png`：深色下文字与圆点对比正常。
+
+## 2026-10-22 · 进入页面自动刷新（0.4.5）
+
+需求：切换页面时自动补刷一次。决策 D1:B / D2:A / D3:A / D4:A / D5:A。
+
+### Step 1 进入动作判定（`src/lib/enterRefresh.ts`）
+
+红（模块缺失）：
+
+```
+ FAIL  src/lib/enterRefresh.test.ts [ src/lib/enterRefresh.test.ts ]
+Error: Failed to load url ./enterRefresh (resolved id: ./enterRefresh) in src/lib/enterRefresh.test.ts. Does the file exist?
+ Test Files  1 failed (1)
+      Tests  no tests
+```
+
+绿：`✓ src/lib/enterRefresh.test.ts (11 tests)`。
+
+### Step 2 节流语义修正
+
+第一版只按时间戳节流：刚加载完概览（`lastRefreshAt` 已更新）后立刻点「任务」页会被挡掉，列表直接空白。
+改成**换页必刷、只有同一页重复进入才节流**（`EnterRefreshGate`）。
+
+红：
+
+```
+ ❯ src/lib/enterRefresh.test.ts (12 tests | 4 failed)
+   × shouldRefreshOnEnter > 换页面总是刷新，不受上次刷新时间影响
+   × shouldRefreshOnEnter > 首次进入某页（还没有上次记录）总是刷新
+   × shouldRefreshOnEnter > 同一页刚好到达最小间隔就放行
+   × shouldRefreshOnEnter > 支持自定义间隔；间隔为 0 表示不节流
+      Tests  4 failed | 8 passed (12)
+```
+
+绿：`✓ src/lib/enterRefresh.test.ts (12 tests)`。
+
+### App.vue 接线
+
+- `switchView` → `await refreshOnEnter()`；任务页保留当前 `folder`。
+- 阶段视图 `@back` 由裸赋值 `view = 'jobs'` 改为 `backToJobs()`（静默补刷一次）。
+- `handleVisibility` 在没有轮询模式时也走 `refreshOnEnter`（概览 / 节点 / 空闲的任务页）。
+- `enterRefreshBusy` 防重入；刷新期间用户切走，结束后会给新页补一次。
+- 任务页用 `loadJobs(folder, true)` + `selectJob(..., true)` 静默刷新，不闪骨架；用 `selectToken` 快照避免 `loadJobs` 自动重选后重复请求。
+
+### 最终验收
+
+```
+ Test Files  16 passed (16)
+      Tests  226 passed (226)
+```
+
+```
+cd backend && go test ./...
+ok  github.com/nixing178/dbx-plugin-jenkins/internal/jenkins  1.425s
+ok  github.com/nixing178/dbx-plugin-jenkins/internal/rpc      1.682s
+```
+
+```
+[check-version] ok: 0.4.5
+✓ 80 modules transformed.
+ui/index.html  224.79 kB │ gzip: 70.79 kB
+```
+
+打包与身份：
+
+```
+Success: Built ...\dist\io.github.nixing178.jenkins-0.4.5-windows-x64.dbxp
+Signature: unsigned review candidate
+[verify-sidecar] ok: io.github.nixing178.jenkins/0.4.5
+```
+
+新增覆盖点：
+
+- `resolveEnterActions`：概览 / 队列 / 节点各刷自己；任务页首次补 `views`；有选中任务时追加 `detail`；build / stages 返回空；顺序固定 views → jobs → detail。
+- `shouldRefreshOnEnter`：换页必刷；首次进入必刷；同页 2s 内跳过、边界放行；自定义间隔与 0 不节流；时钟回拨不刷。
+
+> 说明：App.vue 的分发属接线层，未做 UI 自动化；判定逻辑全部由纯函数单测覆盖，接线通过类型检查 + 构建 + 代码审查确认。
+
+## 构建执行状态列表（0.5.0，2026-10-22）
+
+需求来源：Jenkins 原生首页右栏有 Build Queue 与 Build Executor Status 两个 widget，插件只有前者。决策 D1:1 / D2:1 / D3:1 / D4:2 / D5:1 —— 放概览页、有执行中才 5s 轮询、点行跳任务、不暴露 MCP、版本升 0.5.0。
+
+### 红
+
+```
+$ cd backend && go test ./internal/jenkins/ -run "TestGetExecutors|TestJobNameFromDisplayName"
+internal\jenkins\system_test.go:156:22: client.GetExecutors undefined (type *Client has no field or method GetExecutors)
+internal\jenkins\system_test.go:205:22: client.GetExecutors undefined (type *Client has no field or method GetExecutors)
+internal\jenkins\system_test.go:230:13: undefined: jobNameFromDisplayName
+FAIL	github.com/nixing178/dbx-plugin-jenkins/internal/jenkins [build failed]
+```
+
+```
+$ npx vitest run src/lib/executors.test.ts src/lib/refresh.test.ts src/lib/enterRefresh.test.ts
+ ❯ src/lib/executors.test.ts (0 test)
+   → Failed to load url ./executors ... Does the file exist?
+ ❯ src/lib/enterRefresh.test.ts (12 tests | 1 failed)
+   × 概览页刷新概览数据 + 执行器列表 → expected [ 'overview' ] to deeply equal [ 'overview', 'executors' ]
+ ❯ src/lib/refresh.test.ts
+   × TypeError: hasRunningExecutor is not a function
+ Test Files  3 failed (3)
+      Tests  4 failed | 60 passed (64)
+```
+
+### 绿
+
+```
+$ cd backend && go test ./...
+ok  github.com/nixing178/dbx-plugin-jenkins/internal/jenkins  1.246s
+ok  github.com/nixing178/dbx-plugin-jenkins/internal/rpc      0.865s
+```
+
+```
+$ npx vitest run
+ ✓ src/lib/executors.test.ts (15 tests)
+ ✓ src/lib/refresh.test.ts (52 tests)
+ ✓ src/lib/enterRefresh.test.ts (12 tests)
+ Test Files  17 passed (17)
+      Tests  244 passed (244)
+```
+
+```
+$ pnpm build
+[check-version] ok: 0.5.0
+✓ 84 modules transformed.
+ui/index.html  230.47 kB │ gzip: 72.14 kB
+```
+
+### 实现要点
+
+| 位置 | 处理 |
+| --- | --- |
+| `backend/internal/jenkins/system.go` | `GetExecutors` 复用 `/computer/api/json`，独立 tree（不动 `GetNodes`，避免概览聚合回归）；执行器数组下标 +1 作为槽位序号；空闲槽位也返回 |
+| 同上 | `jobNameFromDisplayName` 剥掉 `Run.getFullDisplayName()` 尾部的 ` #N`；自定义 displayName 不遵循该格式时原样返回 |
+| 同上 | `Queue$Executable`（占位但构建未建）只带 url → `pending=true`，前端显示「等待启动」而不是报错 |
+| `src/lib/executors.ts` | 纯函数：`executorState`（idle/pending/building/settling）、`executorSummary`（`!idle` 计 busy）、`executorProgress` 复用 `buildProgress`、`executorNodeLabel`（空 displayName → 内置节点） |
+| `src/lib/refresh.ts` | `hasRunningExecutor` 只看 `idle === false`；`EXECUTOR_AUTO_REFRESH_INTERVAL_MS = 5000` |
+| `src/App.vue` | `AutoRefreshMode` 新增 `executors`，仅概览页且有占用时启用；`pollExecutors` 不内部 catch，错误上抛给护栏计数 |
+
+### 覆盖点
+
+- 后端：三槽位（内置节点构建中 / 内置节点空闲 / 离线 agent 构建中）字段与顺序；`pending` 占位形态；`jobNameFromDisplayName` 五种输入（含中文与空格、number=0、空串）。
+- 前端：四种执行器状态；`busy/total` 汇总（含 pending 算 busy、空列表不出 NaN）；进度（45% / 超时封顶 99 / 缺估算不定态 / 空闲与等待启动返回 null）；`#N` 标签；轮询判定（占用、等待启动、全空闲、空列表、未加载）。
+- 进入刷新：概览页 actions 变为 `["overview", "executors"]`，先数字后明细；其余页不变。
+
+> 说明：App.vue 的分发属接线层，判定逻辑全部由纯函数单测覆盖，接线通过 `vue-tsc --noEmit` + 构建确认。
+
+### 预览（`docs/executor-preview*.png`）
+
+- `pnpm dev` 打开 `/executor-preview.html`（`?theme=dark` 切深色），假数据覆盖六种形态：内置节点构建中 61%、等待启动、空闲、缺估算的不定态进度、收尾中、离线节点。
+- 截图：`docs/executor-preview.png`、`docs/executor-preview-dark.png`（Chrome headless，1360 宽）。
+- 深色首轮截图暴露「构建中」标签用 `var(--accent)` 作字色对比不足（`#3355ff` on `#1c1f26`）→ 改为「底色 + 1px 描边表达色相、文字统一用 `var(--text)`」；`--warning` 同理，不再硬编码 `#d99b1a1f` / `#b47d0d`。
+
+### 打包与冒烟（0.5.0）
+
+```
+$ npx --yes @dbx-app/plugin-cli@0.1.9 package .
+Building: Go backend
+Packaging: ...\dist\io.github.nixing178.jenkins-0.5.0-windows-x64.dbxp
+Success: Built ...\dist\io.github.nixing178.jenkins-0.5.0-windows-x64.dbxp
+Signature: unsigned review candidate
+```
+
+包内 6 条目；`ui/index.html` 232,537 B 与本地逐字节一致；manifest 0.5.0；sidecar 8,574,976 B → `[verify-sidecar] ok: io.github.nixing178.jenkins/0.5.0`。
+
+从 .dbxp 取出 sidecar 起 mock Jenkins 连接冒烟（临时脚本已删）：
+
+```
+[smoke] jenkins/executors -> 3 rows
+  node="" #1 idle=false pending=false job="demo-job" build=12 building=true
+  node="" #2 idle=false pending=true job="" build=0 building=false
+  node="agent-1" #1 idle=true pending=false job="" build=0 building=false
+[smoke] jenkins/nodes -> built-in busy=2/2
+[smoke] ok: executors 3 rows + nodes 未受影响
+```
+
+确认：空闲槽位占位、`Queue$Executable` → `pending`、离线节点标记、`GetNodes` 的 busy 统计未被新 tree 影响。
+
+## 修复：执行器行跳转 404（0.5.1，2026-10-22）
+
+### 根因
+
+`Run.getFullDisplayName()` 返回的是 `project.getFullDisplayName() + ' ' + displayName`，而
+
+```java
+// hudson.model.AbstractItem
+public final String getFullDisplayName() {
+    return getParent().getFullDisplayName() + " » " + getDisplayName();   // 分隔符是 » 不是 /
+}
+```
+
+所以文件夹里的任务拿到的是 `Builds » anjun-web #12`，按 ` #N` 剥出来是 `Builds » anjun-web`，
+拼成 `/job/Builds » anjun-web` 必然 404（界面显示「Jenkins 地址、上下文路径或资源不存在」）。
+自定义 displayName 的任务同样对不上。
+
+### 修复
+
+改为从 `currentExecutable.url` 反解 fullName（`Run.getUrl()` = `project.getUrl() + number + "/"`，
+`project.getUrl()` 是 `/job/<folder>/job/<job>/`），新增 `jobFullNameFromURL`：
+
+```go
+segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+for i := 0; i < len(segments)-1; i++ {
+    if segments[i] == "job" { names = append(names, segments[i+1]); i++ }
+}
+```
+
+`jobNameFromDisplayName` 降级为 url 缺失时的兜底，注释里写明只对顶层任务可靠。
+
+### 红 → 绿
+
+```
+$ go test ./internal/jenkins/ -run "TestGetExecutors|TestJobFullNameFromURL"
+internal\jenkins\system_test.go:236:13: undefined: jobFullNameFromURL
+FAIL	[build failed]
+
+$ go test ./...
+ok  internal/jenkins  1.176s
+ok  internal/rpc      0.750s
+```
+
+`TestGetExecutors` 的 mock 换成真实形态（`Builds » anjun-web #12` + 编码过的 folder url），
+新增 `TestJobFullNameFromURL` 10 个用例：顶层 / context path / 文件夹 / 三层 / 相对地址 /
+URL 编码中文 / 缺尾斜杠 / 带查询串 / 队列占位 / 空串。
+
+### 打包与端到端冒烟（0.5.1）
+
+- `dist/io.github.nixing178.jenkins-0.5.1-windows-x64.dbxp`，4,954,841 B，sha256 `a1221d54…`；
+  `ui/index.html` 与本地一致；`[verify-sidecar] ok: io.github.nixing178.jenkins/0.5.1`。
+- mock Jenkins（`fullDisplayName` 用 `»`、url 用 folder 结构）→ 从包内 sidecar 走完整链路：
+
+```
+[smoke] executors[0]: jobName="Builds/anjun-web" build=12
+[smoke] jenkins/job -> Builds/anjun-web (status building)
+[smoke] jenkins/build -> #12
+[smoke] ok: 文件夹任务名从 url 反解正确，跳转链路 200
+```
+
+## 构建详情页变更记录列表优化（0.6.0，2026-10-22）
+
+### 需求与决策
+
+源哥一句话「构建任务详情页-变更记录列表优化」，按 `docs/plan-build-changes.md` 推荐项全取：
+D1:2 展示层 + 数据增强、D2:A 时间 + 文件数 + 正文、D3:2 最新在前、D4:1 折叠 8 条、
+D5:1 点哈希复制、D6:1 首行 + 展开正文、D7:1 不做搜索、D8:1 浮层只复用排序、D9:1 0.6.0、D10:1 MCP 透出。
+
+### 真机字段（临时 Jenkins 2.587，git-pipeline #3）
+
+```
+GET /job/git-pipeline/3/api/json?tree=changeSets[items[commitId,msg,comment,timestamp,date,author[fullName],affectedPaths]]
+{"items":[{"commitId":"8e45f64…","msg":"probe B: 第二条提交",
+           "comment":"probe B: 第二条提交\n\n- 明细一…\n- 明细二…\n",
+           "timestamp":1792659786000,"date":"2026-10-22 17:03:06 +0800",
+           "author":{"fullName":"e2e"},"affectedPaths":["PROBE.md"]}]}
+```
+
+四个必须记住的点：
+
+1. **`msg` 只有首行（subject）**，多行正文在 `comment`；原来的详情页不是"多行撑爆"，而是"正文根本没取"。
+2. **`date` 是字符串、`timestamp` 才是 epoch 毫秒** → 由后端归一化，前端不碰 `date`。
+3. **tree 写 `items[*]` 会让 `author` 变成 `{}`**（本次实测踩到），必须显式 `author[fullName]`。
+4. changelog 顺序是**旧→新**，且同秒提交 timestamp 相同 → 前端排序必须稳定。
+
+### 后端红 → 绿
+
+```
+$ go test ./internal/jenkins/ -run "TestGetBuildDetailReadsChangeDetails|TestGetBuildChangeTimestampFallsBackToDate|TestGetBuildChangeBodyEmptyForSingleLine|TestGetStageMatrixDropsChangeBody"
+internal\jenkins\builds_test.go:227:12: change.Timestamp undefined (type ChangeSetItem has no field or method Timestamp)
+internal\jenkins\builds_test.go:230:12: change.FileCount undefined ...
+FAIL	[build failed]
+
+$ go test ./...
+ok  	internal/jenkins	1.300s
+ok  	internal/rpc	0.917s
+```
+
+新增 4 例：详情读全字段（含 tree 断言）/ `date` 兜底归一化 / 单行提交无正文 / 矩阵不请求 comment 且 Body 为空。
+
+一次假绿：`changeBody` 起初先 `TrimSpace` 再切行，单行 `comment` 的换行被吃掉，
+`TestGetBuildChangeBodyEmptyForSingleLine` 报 `body = "fix bug"` → 改成先按原始文本切行再修剪。
+
+### 前端红 → 绿
+
+```
+$ npx vitest run src/lib/changes.test.ts
+Error: Failed to load url ./changes (resolved id: ./changes) ... Does the file exist?
+Test Files  1 failed (1)   Tests  no tests
+
+$ npx vitest run
+Test Files  18 passed (18)
+     Tests  263 passed (263)
+```
+
+`src/lib/changes.ts` 19 例：稳定倒序 / 时间全缺失保序 / 部分缺失 / 同秒稳定 / 不改原数组 /
+折叠边界（8、全量、不足 8、limit≤0）/ 摘要计数（空作者、缺 fileCount）/ 正文修剪 /
+同年 `10-22 17:03` / 跨年 `2025-12-31` / 英文 `Oct 22, 17:03` / 缺失 `—`。
+
+### 真机端到端（真实 client 直连，探针已删）
+
+```
+$ go run ./cmd/probe
+[
+  {"commitId":"6a24159…","message":"probe A: 第一条提交","author":"e2e","timestamp":1792659786000,"fileCount":1},
+  {"commitId":"8e45f64…","message":"probe B: 第二条提交","author":"e2e","timestamp":1792659786000,"fileCount":1,
+   "body":"- 明细一：验证多行消息的展示\n- 明细二：应默认折叠为单行摘要\n- 明细三：展开后才看到全部内容"},
+  {"commitId":"0c69226…","message":"probe C: 第三条提交","author":"e2e","timestamp":1792659786000,"fileCount":1}
+]
+```
+
+- `timestamp` 与 `git log --format=%ai` 一致（2026-10-22 17:03:06 +0800）；
+- `body` 只出现在多行提交上、首行已剥掉；单行提交不带 `body` 字段（omitempty）。
+
+### 交互（CDP，1280×980）
+
+```
+初始（折叠 8 条）：rows=8,  moreLabel="展开全部 12 条", bodyCount=0, summary="12 个提交 · 3 位作者 · 98 个文件"
+点击展开全文：      rows=8,  bodyCount=1, toggle="收起全文"
+点击展开全部：      rows=12, moreLabel="收起"
+最后一行时间：      2025-10-07（跨年显示完整日期）
+点击收起：          rows=8
+```
+
+### 预览
+
+- `docs/screenshots/build-changes-preview.png`（浅色）
+- `docs/screenshots/build-changes-preview-dark.png`（深色）
+- `docs/screenshots/build-changes-expanded.png`（展开全部 + 正文展开）
+- 页面：`changes-preview.html` + `src/changes-preview-main.ts`（`pnpm dev` 打开，`?theme=dark` 切深色）
+
+### 验证命令汇总
+
+```
+go test ./...              # 全绿
+npx vitest run             # 263 PASS（18 files）
+npx vue-tsc --noEmit       # 0 错
+pnpm build                 # [check-version] ok: 0.6.0，ui/index.html 235.25 kB
+```
+
+### 打包（0.6.0）
+
+- `dist/io.github.nixing178.jenkins-0.6.0-windows-x64.dbxp`，unsigned review candidate。
+- 包内 6 条目；`ui/index.html` 237,455 B 与本地逐字节一致（sha256 `75c6082b…`）。
+- 从包内提取 `bin/windows-x64/dbx-plugin-jenkins.exe`（8,579,072 B）→
+  `[verify-sidecar] ok: io.github.nixing178.jenkins/0.6.0`。

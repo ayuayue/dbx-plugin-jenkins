@@ -4,6 +4,7 @@ import type {
   ConsoleChunk,
   CreateJobPayload,
   CreateViewPayload,
+  ExecutorInfo,
   JobConfigResponse,
   JobDetail,
   JobSummary,
@@ -12,6 +13,7 @@ import type {
   NodeInfo,
   Overview,
   QueueItem,
+  StageInfo,
   StageMatrix,
   TriggerResult,
   ViewConfigResponse,
@@ -89,6 +91,19 @@ export const jenkinsApi = {
     return invoke<BuildDetail>("jenkins/build", { job, number }, timeoutMs);
   },
 
+  /** 单次构建的阶段，供构建列表的进度条按阶段步进；比 jenkins/stages 矩阵轻得多。 */
+  buildStages(
+    job: string,
+    number: number,
+    timeoutMs = 15_000,
+  ): Promise<{ stages: StageInfo[] }> {
+    return invoke<{ stages: StageInfo[] }>(
+      "jenkins/buildStages",
+      { job, number },
+      timeoutMs,
+    );
+  },
+
   console(job: string, number: number, start: number): Promise<ConsoleChunk> {
     return invoke<ConsoleChunk>(
       "jenkins/console",
@@ -119,6 +134,11 @@ export const jenkinsApi = {
 
   nodes(): Promise<{ nodes: NodeInfo[] }> {
     return invoke<{ nodes: NodeInfo[] }>("jenkins/nodes", {}, 30_000);
+  },
+
+  /** 执行器槽位明细；`timeoutMs` 供轮询传更短的超时。 */
+  executors(timeoutMs = 30_000): Promise<{ executors: ExecutorInfo[] }> {
+    return invoke<{ executors: ExecutorInfo[] }>("jenkins/executors", {}, timeoutMs);
   },
 
   stages(job: string, limit = 10, timeoutMs = 120_000): Promise<StageMatrix> {

@@ -73,6 +73,8 @@ type BuildSummary struct {
 	Causes      []Cause `json:"causes"`
 	Status      Status  `json:"status"`
 	CommitCount int     `json:"commitCount"`
+	// EstimatedDuration 是 Jenkins 侧估算的本次构建总耗时，列表用它算进度条。
+	EstimatedDuration int64 `json:"estimatedDuration"`
 	// Changes 只在内部传给阶段矩阵，不进入 jenkins/builds 的响应体。
 	Changes []ChangeSetItem `json:"-"`
 }
@@ -119,6 +121,13 @@ type ChangeSetItem struct {
 	CommitID string `json:"commitId"`
 	Message  string `json:"message"`
 	Author   string `json:"author"`
+	// Timestamp 是归一化后的提交时间（epoch 毫秒）：优先 Jenkins timestamp，
+	// 缺失时由 date 字符串解析，解析不出来为 0。
+	Timestamp int64 `json:"timestamp,omitempty"`
+	// FileCount 是本次提交改动的文件数（affectedPaths 长度）。
+	FileCount int `json:"fileCount,omitempty"`
+	// Body 是提交正文（comment 去掉首行）。只有构建详情返回，阶段矩阵恒为空。
+	Body string `json:"body,omitempty"`
 }
 
 // Artifact 是构建产物。
@@ -174,6 +183,27 @@ type Node struct {
 	Busy               int      `json:"busy"`
 	Labels             []string `json:"labels"`
 	OfflineReason      string   `json:"offlineReason"`
+}
+
+// Executor 是节点上的一个执行器槽位；空闲槽位也会返回，供界面显示 0/N 的占位。
+type Executor struct {
+	// Node 是节点显示名，控制器的 displayName 可能为空串，由前端归一成「内置节点」。
+	Node        string `json:"node"`
+	NodeOffline bool   `json:"nodeOffline"`
+	// Index 是槽位序号，从 1 开始（Jenkins API 不提供）。
+	Index int  `json:"index"`
+	Idle  bool `json:"idle"`
+	// JobName 是任务全名；Queue$Executable 形态（占位中）为空。
+	JobName     string `json:"jobName"`
+	BuildNumber int    `json:"buildNumber"`
+	Building    bool   `json:"building"`
+	Timestamp   int64  `json:"timestamp"`
+	// EstimatedDuration / Duration 单位毫秒；Duration 在构建期间由服务端实时推进。
+	EstimatedDuration int64  `json:"estimatedDuration"`
+	Duration          int64  `json:"duration"`
+	Result            string `json:"result"`
+	// Pending 表示执行器已占位但构建对象还没建好（Queue$Executable）。
+	Pending bool `json:"pending"`
 }
 
 // Overview 是概览页需要的聚合数据。

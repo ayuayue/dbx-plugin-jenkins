@@ -1,16 +1,29 @@
 <script setup lang="ts">
+import { computed, ref } from "vue";
 import { t } from "../i18n";
+import {
+  CHANGE_PREVIEW_LIMIT,
+  changeBody,
+  changeSummary,
+  formatChangeTime,
+  hasBody,
+  sortChanges,
+  visibleChanges,
+} from "../lib/changes";
 import { formatDuration, formatTimestamp } from "../lib/format";
+import type { RefreshUi } from "../lib/refreshStatus";
+import { shortCommitId } from "../lib/stage";
 import { statusMeta } from "../lib/status";
 import type { BuildDetail } from "../types";
 import ConsoleView from "./ConsoleView.vue";
+import RefreshBadge from "./RefreshBadge.vue";
 
-defineProps<{
+const props = defineProps<{
   build: BuildDetail;
   jobFullName: string;
   readOnly: boolean;
   locale: "zh" | "en";
-  autoRefreshing?: boolean;
+  refresh: RefreshUi;
 }>();
 
 const emit = defineEmits<{
@@ -18,6 +31,54 @@ const emit = defineEmits<{
   stop: [number: number];
   refresh: [];
 }>();
+
+/** 变更列表默认折叠，避免几十条提交把控制台挤到页面底部。 */
+const expanded = ref(false);
+/** 已展开正文的提交号。用 Set 存，3s 轮询换数据时不会把展开状态冲掉。 */
+const expandedBodies = ref(new Set<string>());
+const copiedId = ref("");
+
+const orderedChanges = computed(() => sortChanges(props.build.changeSet ?? []));
+const summary = computed(() => changeSummary(orderedChanges.value));
+const rows = computed(() =>
+  visibleChanges(orderedChanges.value, expanded.value, CHANGE_PREVIEW_LIMIT),
+);
+const summaryText = computed(() =>
+  t("changeSummary", {
+    commits: summary.value.commits,
+    authors: summary.value.authors,
+    files: summary.value.files,
+  }),
+);
+
+function toggleBody(commitId: string): void {
+  const next = new Set(expandedBodies.value);
+  if (next.has(commitId)) next.delete(commitId);
+  else next.add(commitId);
+  expandedBodies.value = next;
+}
+
+function isBodyOpen(commitId: string): boolean {
+  return expandedBodies.value.has(commitId);
+}
+
+/** 点哈希复制完整 commit id：宿主有 copy 能力时优先用，兜底走浏览器剪贴板。 */
+async function copyCommit(commitId: string): Promise<void> {
+  if (!commitId) return;
+  try {
+    if (window.dbxPlugin?.copy) {
+      await window.dbxPlugin.copy(commitId);
+    } else {
+      await navigator.clipboard.writeText(commitId);
+    }
+    copiedId.value = commitId;
+    window.setTimeout(() => {
+      if (copiedId.value === commitId) copiedId.value = "";
+    }, 1500);
+  } catch {
+    // 复制失败不打断阅读，静默即可。
+  }
+}
 </script>
 
 <template>
@@ -37,12 +98,27 @@ const emit = defineEmits<{
         </p>
       </div>
       <div class="actions">
-        <span v-if="autoRefreshing" class="auto-refresh">
-          <span class="pulse" aria-hidden="true"></span>
-          {{ t("autoRefreshing") }}
-        </span>
-        <button type="button" class="ghost" @click="emit('refresh')">
-          {{ t("refresh") }}
+        <RefreshBadge
+          :mode="refresh.mode"
+          :paused="refresh.paused"
+          :in-flight="refresh.inFlight"
+          :last-at="refresh.lastAt"
+          :interval-ms="refresh.intervalMs"
+        />
+        <button
+          type="button"
+          class="ghost"
+          :class="{ done: refresh.refreshed }"
+          :disabled="refresh.refreshing"
+          @click="emit('refresh')"
+        >
+          {{
+            refresh.refreshing
+              ? t("refreshing")
+              : refresh.refreshed
+                ? t("refreshed")
+                : t("refresh")
+          }}
         </button>
         <button
           v-if="build.building && !readOnly"
@@ -77,24 +153,64 @@ const emit = defineEmits<{
     <section v-if="build.changeSet?.length" class="panel">
       <div class="panel-head">
         <h2>{{ t("changes") }}</h2>
-        <span class="count">{{ build.changeSet.length }}</span>
+        <span class="count">{{ summaryText }}</span>
       </div>
       <table class="changes">
         <thead>
           <tr>
-            <th>Commit</th>
-            <th>Author</th>
-            <th>Message</th>
+            <th class="col-commit">{{ t("commit") }}</th>
+            <th class="col-time">{{ t("committedAt") }}</th>
+            <th class="col-author">{{ t("author") }}</th>
+            <th>{{ t("message") }}</th>
+            <th class="col-files">{{ t("changedFiles") }}</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="item in build.changeSet" :key="item.commitId">
-            <td><code>{{ item.commitId.slice(0, 8) }}</code></td>
-            <td>{{ item.author || "—" }}</td>
-            <td class="message">{{ item.message }}</td>
+          <tr v-for="(item, index) in rows" :key="item.commitId || index">
+            <td class="col-commit">
+              <button
+                type="button"
+                class="commit-id"
+                :title="t('copyCommit')"
+                @click="copyCommit(item.commitId)"
+              >
+                <code>{{ shortCommitId(item.commitId) }}</code>
+                <span v-if="copiedId === item.commitId" class="copied">{{ t("copied") }}</span>
+              </button>
+            </td>
+            <td class="col-time">{{ formatChangeTime(item.timestamp ?? 0, locale) }}</td>
+            <td class="col-author" :title="item.author">{{ item.author || "—" }}</td>
+            <td class="message">
+              <span class="subject">{{ item.message || "—" }}</span>
+              <button
+                v-if="hasBody(item)"
+                type="button"
+                class="toggle-body"
+                @click="toggleBody(item.commitId)"
+              >
+                {{ isBodyOpen(item.commitId) ? t("hideFullMessage") : t("showFullMessage") }}
+              </button>
+              <pre v-if="hasBody(item) && isBodyOpen(item.commitId)" class="body">{{
+                changeBody(item)
+              }}</pre>
+            </td>
+            <td class="col-files">{{ item.fileCount || "—" }}</td>
           </tr>
         </tbody>
       </table>
+      <div v-if="orderedChanges.length > CHANGE_PREVIEW_LIMIT" class="more">
+        <button type="button" class="ghost" @click="expanded = !expanded">
+          {{ expanded ? t("collapseAll") : t("expandAll", { count: orderedChanges.length }) }}
+        </button>
+      </div>
+    </section>
+
+    <section v-else class="panel">
+      <div class="panel-head">
+        <h2>{{ t("changes") }}</h2>
+        <span class="count">{{ t("noChanges") }}</span>
+      </div>
+      <p class="empty-hint">{{ t("noChangesHint") }}</p>
     </section>
 
     <section v-if="build.artifacts?.length" class="panel">
@@ -186,33 +302,21 @@ h1 {
   font-weight: 600;
 }
 
-.auto-refresh {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.ghost:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ghost:disabled {
+  opacity: 0.55;
+  cursor: default;
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.ghost.done {
+  border-color: var(--success);
   color: var(--success);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.pulse {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--success);
-  animation: auto-refresh-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes auto-refresh-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-    transform: scale(0.8);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1);
-  }
 }
 
 .status-pill {
@@ -296,6 +400,7 @@ h2 {
 
 .changes {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 12px;
 }
@@ -314,8 +419,97 @@ h2 {
   vertical-align: top;
 }
 
+.col-commit {
+  width: 116px;
+}
+
+.col-time {
+  width: 104px;
+  white-space: nowrap;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.col-author {
+  width: 104px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col-files {
+  width: 56px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.commit-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.commit-id code {
+  font-size: 11px;
+  color: var(--text);
+}
+
+.commit-id:hover code {
+  color: var(--accent);
+}
+
+.copied {
+  color: var(--success);
+  font-size: 11px;
+}
+
 .message {
   line-height: 1.5;
+}
+
+.subject {
+  word-break: break-word;
+}
+
+.toggle-body {
+  margin-left: 6px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.toggle-body:hover {
+  text-decoration: underline;
+}
+
+.body {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.more {
+  margin-top: 10px;
+  text-align: center;
+}
+
+.empty-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .artifacts {

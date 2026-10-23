@@ -69,6 +69,8 @@ export interface BuildSummary {
   building: boolean;
   timestamp: number;
   duration: number;
+  /** Jenkins 侧估算耗时，用于构建中的进度条；缺失时为 0。 */
+  estimatedDuration: number;
   displayName: string;
   causes: Cause[] | null;
   status: JenkinsStatus;
@@ -78,6 +80,12 @@ export interface ChangeSetItem {
   commitId: string;
   message: string;
   author: string;
+  /** 提交时间（epoch 毫秒）。后端归一化后下发，缺失为 0/undefined。 */
+  timestamp?: number;
+  /** 改动文件数，来自 Jenkins affectedPaths。 */
+  fileCount?: number;
+  /** 提交正文（已去掉首行 subject）。只有构建详情会返回。 */
+  body?: string;
 }
 
 export interface Artifact {
@@ -153,6 +161,27 @@ export interface NodeInfo {
   busy: number;
   labels: string[] | null;
   offlineReason: string;
+}
+
+/** 节点上的一个执行器槽位；空闲槽位也会返回，用于显示占位。 */
+export interface ExecutorInfo {
+  /** 节点显示名；控制器为「内置节点」，后端可能返回空串。 */
+  node: string;
+  nodeOffline: boolean;
+  /** 槽位序号，从 1 开始。 */
+  index: number;
+  idle: boolean;
+  /** 任务全名；占位中（Queue$Executable）为空。 */
+  jobName: string;
+  buildNumber: number;
+  building: boolean;
+  timestamp: number;
+  /** 单位毫秒；构建期间由服务端实时推进。 */
+  estimatedDuration: number;
+  duration: number;
+  result: string;
+  /** 执行器已占位，但构建对象还没建好。 */
+  pending: boolean;
 }
 
 export interface Overview {

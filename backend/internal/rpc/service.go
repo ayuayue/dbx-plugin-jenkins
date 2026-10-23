@@ -179,6 +179,22 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 		}
 		return matrix, nil
 
+	case "jenkins/buildStages":
+		if strings.TrimSpace(request.Job) == "" {
+			return nil, invalidParams("missing job name")
+		}
+		if request.Number <= 0 {
+			return nil, invalidParams("build number must be positive")
+		}
+		stages, err := client.GetBuildStages(ctx, request.Job, request.Number)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if stages == nil {
+			stages = []jenkins.Stage{}
+		}
+		return map[string]any{"stages": stages}, nil
+
 	case "jenkins/views":
 		views, err := client.GetViews(ctx)
 		if err != nil {
@@ -292,6 +308,13 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 			return nil, mapError(err)
 		}
 		return map[string]any{"nodes": nodes}, nil
+
+	case "jenkins/executors":
+		executors, err := client.GetExecutors(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return map[string]any{"executors": executors}, nil
 
 	case "jenkins/jobConfig":
 		if strings.TrimSpace(request.Job) == "" {

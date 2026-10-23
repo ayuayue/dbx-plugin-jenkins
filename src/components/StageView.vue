@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { t } from "../i18n";
+import { sortChanges } from "../lib/changes";
 import { formatTimestamp } from "../lib/format";
 import {
   commitMessageSummary,
@@ -11,14 +12,16 @@ import {
   stageTone,
 } from "../lib/stage";
 import { statusMeta } from "../lib/status";
+import type { RefreshUi } from "../lib/refreshStatus";
 import type { StageBuildInfo, StageInfo, StageMatrix } from "../types";
+import RefreshBadge from "./RefreshBadge.vue";
 
 const props = defineProps<{
   job: string;
   matrix: StageMatrix | null;
   loading: boolean;
   locale: "zh" | "en";
-  autoRefreshing: boolean;
+  refresh: RefreshUi;
 }>();
 
 const emit = defineEmits<{
@@ -44,6 +47,8 @@ const maxDurations = computed(() =>
 );
 
 const popoverBuild = ref<StageBuildInfo | null>(null);
+/** 与构建详情页同一套排序：最新在前。 */
+const popoverChanges = computed(() => sortChanges(popoverBuild.value?.changes ?? []));
 const popoverEl = ref<HTMLElement | null>(null);
 const popoverStyle = ref<Record<string, string>>({ top: "0px", left: "0px" });
 
@@ -214,12 +219,27 @@ onBeforeUnmount(() => closePopover());
         </p>
       </div>
       <div class="stage-actions">
-        <span v-if="autoRefreshing" class="auto-refresh">
-          <span class="pulse" />
-          {{ t("autoRefreshing") }}
-        </span>
-        <button type="button" class="ghost" @click="emit('refresh')">
-          {{ t("refresh") }}
+        <RefreshBadge
+          :mode="refresh.mode"
+          :paused="refresh.paused"
+          :in-flight="refresh.inFlight"
+          :last-at="refresh.lastAt"
+          :interval-ms="refresh.intervalMs"
+        />
+        <button
+          type="button"
+          class="ghost"
+          :class="{ done: refresh.refreshed }"
+          :disabled="refresh.refreshing"
+          @click="emit('refresh')"
+        >
+          {{
+            refresh.refreshing
+              ? t("refreshing")
+              : refresh.refreshed
+                ? t("refreshed")
+                : t("refresh")
+          }}
         </button>
       </div>
     </header>
@@ -312,7 +332,7 @@ onBeforeUnmount(() => closePopover());
           {{ commitLabel(popoverBuild.changes?.length ?? 0) }}
         </header>
         <ul class="commit-list">
-          <li v-for="item in popoverBuild.changes" :key="`${item.commitId}-${item.message}`">
+          <li v-for="item in popoverChanges" :key="`${item.commitId}-${item.message}`">
             <code class="commit-id">{{ shortCommitId(item.commitId) }}</code>
             <div class="commit-body">
               <span class="commit-message" :title="item.message">
@@ -393,36 +413,6 @@ h1 {
   flex: none;
 }
 
-.auto-refresh {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--success);
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.pulse {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--success);
-  animation: stage-auto-refresh-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes stage-auto-refresh-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-    transform: scale(0.8);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
 .ghost {
   flex: none;
   border: 1px solid var(--border);
@@ -437,6 +427,18 @@ h1 {
 .ghost:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.ghost:disabled {
+  opacity: 0.55;
+  cursor: default;
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.ghost.done {
+  border-color: var(--success);
+  color: var(--success);
 }
 
 .empty {

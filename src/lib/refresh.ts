@@ -1,4 +1,4 @@
-import type { BuildDetail, BuildSummary, StageMatrix } from "../types";
+import type { BuildDetail, BuildSummary, ExecutorInfo, StageMatrix } from "../types";
 
 /** 构建列表轮询间隔：有构建中时每 3s 刷新一次。 */
 export const AUTO_REFRESH_INTERVAL_MS = 3000;
@@ -8,6 +8,9 @@ export const STAGE_AUTO_REFRESH_INTERVAL_MS = 5000;
 
 /** 队列轮询间隔：排队项进出比构建状态慢，5s 足够且不压 Jenkins。 */
 export const QUEUE_AUTO_REFRESH_INTERVAL_MS = 5000;
+
+/** 执行器轮询间隔：只在有执行器被占用时启停，全空闲零请求。 */
+export const EXECUTOR_AUTO_REFRESH_INTERVAL_MS = 5000;
 
 /** 触发构建后跟踪新构建出现的最长时间：排队过久就放弃跟踪，避免无休止轮询。 */
 export const PENDING_BUILD_TIMEOUT_MS = 120_000;
@@ -40,6 +43,14 @@ export function hasRunningStage(matrix: StageMatrix | null | undefined): boolean
       RUNNING_STAGE_STATUSES.has((stage.status ?? "").toLowerCase()),
     );
   });
+}
+
+/** 执行器列表是否需要自动刷新：只要有槽位被占用（含等待启动）就继续。 */
+export function hasRunningExecutor(
+  rows: ExecutorInfo[] | null | undefined,
+): boolean {
+  if (!rows?.length) return false;
+  return rows.some((row) => row.idle === false);
 }
 
 /** 构建详情页是否需要轮询：只要这一条构建还在跑。 */
@@ -125,6 +136,13 @@ export interface AutoRefresherOptions {
   maxConsecutiveFailures?: number;
   /** 因连续失败被自动暂停时回调，供调用方提示用户。 */
   onPaused?: (reason: "failures") => void;
+  /** 每轮请求发出前回调（用于「请求中」指示）。 */
+  onRunStart?: () => void;
+  /**
+   * 每轮请求结束后回调，`ok` 表示本轮是否成功。
+   * 即使本轮因 stop()/restart() 作废也会回调，避免界面卡在「请求中」。
+   */
+  onRunEnd?: (ok: boolean) => void;
 }
 
 export interface AutoRefresher {
@@ -167,12 +185,15 @@ export function createAutoRefresher(options: AutoRefresherOptions): AutoRefreshe
     if (!running || current !== generation) return;
 
     let failed = false;
+    options.onRunStart?.();
     try {
       await options.task();
     } catch {
       // 自动刷新失败不打断循环；是否提示由调用方决定。
       failed = true;
     }
+    // 收尾回调必须无条件触发：本轮若被 stop()/restart() 作废，界面也得退出「请求中」。
+    options.onRunEnd?.(!failed);
 
     if (!running || current !== generation) return;
 

@@ -11,6 +11,7 @@ import {
   evaluatePendingBuild,
   hasNewBuild,
   hasRunningBuild,
+  hasRunningExecutor,
   hasRunningStage,
   shouldPollBuildDetail,
   shouldRefreshJobsAfterPending,
@@ -23,6 +24,7 @@ function build(number: number, overrides: Partial<BuildSummary> = {}): BuildSumm
     building: false,
     timestamp: 1700000000000,
     duration: 1000,
+    estimatedDuration: 0,
     displayName: `#${number}`,
     causes: null,
     status: "success",
@@ -438,6 +440,71 @@ describe("createAutoRefresher trigger", () => {
   });
 });
 
+describe("createAutoRefresher run hooks", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reports the start and a successful end of each run", async () => {
+    const events: string[] = [];
+    const refresher = createAutoRefresher({
+      intervalMs: 1000,
+      task: async () => {},
+      onRunStart: () => events.push("start"),
+      onRunEnd: (ok) => events.push(ok ? "ok" : "fail"),
+    });
+
+    refresher.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(events).toEqual(["start", "ok"]);
+
+    refresher.stop();
+  });
+
+  it("reports a failed run and still counts it towards the guard", async () => {
+    const task = vi.fn<() => Promise<void>>().mockRejectedValue(new Error("boom"));
+    const ends: boolean[] = [];
+    const onPaused = vi.fn();
+    const refresher = createAutoRefresher({
+      intervalMs: 1000,
+      task,
+      maxConsecutiveFailures: 2,
+      onPaused,
+      onRunEnd: (ok) => ends.push(ok),
+    });
+
+    refresher.start();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(ends).toEqual([false, false]);
+    expect(onPaused).toHaveBeenCalledWith("failures");
+  });
+
+  it("still reports the end of an in-flight run after stop()", async () => {
+    let resolveTask: (() => void) | undefined;
+    const task = () =>
+      new Promise<void>((resolve) => {
+        resolveTask = resolve;
+      });
+    const ends: boolean[] = [];
+    const refresher = createAutoRefresher({
+      intervalMs: 1000,
+      task,
+      onRunEnd: (ok) => ends.push(ok),
+    });
+
+    refresher.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    refresher.stop();
+    resolveTask?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ends).toEqual([true]);
+  });
+});
+
 describe("shouldRefreshJobsAfterPending", () => {
   it("refreshes once the new build showed up", () => {
     expect(shouldRefreshJobsAfterPending("settled")).toBe(true);
@@ -519,5 +586,37 @@ describe("evaluatePendingBuild", () => {
 
   it("keeps watching before the deadline", () => {
     expect(evaluatePendingBuild(pending, "demo", [build(37)], now)).toBe("watching");
+  });
+});
+
+describe("hasRunningExecutor", () => {
+  const idle = {
+    node: "",
+    nodeOffline: false,
+    index: 1,
+    idle: true,
+    jobName: "",
+    buildNumber: 0,
+    building: false,
+    timestamp: 0,
+    estimatedDuration: 0,
+    duration: 0,
+    result: "",
+    pending: false,
+  };
+  const busy = { ...idle, idle: false, building: true, buildNumber: 3, jobName: "demo" };
+
+  it("有执行器被占用就继续轮询", () => {
+    expect(hasRunningExecutor([idle, busy])).toBe(true);
+  });
+
+  it("等待启动的占位也继续轮询", () => {
+    expect(hasRunningExecutor([{ ...idle, idle: false, pending: true }])).toBe(true);
+  });
+
+  it("全空闲、空列表或未加载时不轮询", () => {
+    expect(hasRunningExecutor([idle, { ...idle, index: 2 }])).toBe(false);
+    expect(hasRunningExecutor([])).toBe(false);
+    expect(hasRunningExecutor(null)).toBe(false);
   });
 });

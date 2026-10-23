@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { t } from "../i18n";
-import type { Overview } from "../types";
+import type { ExecutorInfo, Overview } from "../types";
+import ExecutorList from "./ExecutorList.vue";
 
 const props = defineProps<{
   overview: Overview | null;
   loading: boolean;
+  executors: ExecutorInfo[];
+  loadingExecutors: boolean;
 }>();
 
-const emit = defineEmits<{ refresh: [] }>();
+const emit = defineEmits<{ refresh: []; openExecutor: [row: ExecutorInfo] }>();
 
 const executorPercent = computed(() => {
   if (!props.overview || props.overview.executorsTotal <= 0) return 0;
@@ -67,6 +70,12 @@ const executorPercent = computed(() => {
           <span class="card-hint">{{ overview.mode || "NORMAL" }}</span>
         </article>
       </div>
+
+      <ExecutorList
+        :rows="executors"
+        :loading="loadingExecutors"
+        @open="emit('openExecutor', $event)"
+      />
 
       <section class="panel">
         <h2>{{ t("connection") }}</h2>

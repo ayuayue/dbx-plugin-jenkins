@@ -15,10 +15,13 @@ import StageView from "./components/StageView.vue";
 import ToastHost from "./components/ToastHost.vue";
 import ViewEditor from "./components/ViewEditor.vue";
 import { locale, syncLocale, t } from "./i18n";
+import { resolveEnterActions, shouldRefreshOnEnter, type AppView } from "./lib/enterRefresh";
 import { errorText } from "./lib/errors";
+import { diffBuildRows, type RefreshUi } from "./lib/refreshStatus";
 import { createToastQueue, type ToastItem, type ToastTone } from "./lib/toast";
 import {
   AUTO_REFRESH_INTERVAL_MS,
+  EXECUTOR_AUTO_REFRESH_INTERVAL_MS,
   POLL_TIMEOUT_MS,
   QUEUE_AUTO_REFRESH_INTERVAL_MS,
   STAGE_AUTO_REFRESH_INTERVAL_MS,
@@ -26,6 +29,7 @@ import {
   createPendingBuild,
   evaluatePendingBuild,
   hasRunningBuild,
+  hasRunningExecutor,
   hasRunningStage,
   shouldPollBuildDetail,
   shouldRefreshJobsAfterPending,
@@ -44,6 +48,7 @@ import type {
   BuildSummary,
   CreateJobPayload,
   CreateViewPayload,
+  ExecutorInfo,
   JobConfigResponse,
   JobDetail,
   JobSummary,
@@ -51,6 +56,7 @@ import type {
   NodeInfo,
   Overview,
   QueueItem,
+  StageInfo,
   StageMatrix,
   ViewConfigResponse,
   ViewInfo,
@@ -67,13 +73,15 @@ const connectionName = ref("");
 const identity = ref<Identity | null>(null);
 const readOnly = ref(true);
 
-const view = ref<"overview" | "jobs" | "build" | "stages" | "queue" | "nodes">("overview");
+const view = ref<AppView>("overview");
 const folder = ref("");
 const jobs = ref<JobSummary[]>([]);
 const views = ref<ViewInfo[]>([]);
 const activeView = ref("");
 const selectedJob = ref<JobDetail | null>(null);
 const builds = ref<BuildSummary[]>([]);
+/** 正在构建的那一次构建的阶段快照，供列表进度条按阶段步进。 */
+const buildStageSnapshot = ref<{ number: number; stages: StageInfo[] } | null>(null);
 const selectedBuild = ref<BuildDetail | null>(null);
 const stageMatrix = ref<StageMatrix | null>(null);
 const loadingStages = ref(false);
@@ -81,15 +89,28 @@ const buildReturnView = ref<"jobs" | "stages">("jobs");
 const overview = ref<Overview | null>(null);
 const queueItems = ref<QueueItem[]>([]);
 const nodes = ref<NodeInfo[]>([]);
+/** 概览页的执行器槽位明细。 */
+const executors = ref<ExecutorInfo[]>([]);
 
 const loadingJobs = ref(false);
 const loadingJob = ref(false);
 const loadingBuilds = ref(false);
 const loadingView = ref(false);
+/** 执行器面板独立加载态：和概览主数据并行拉，互不阻塞。 */
+const loadingExecutors = ref(false);
 const showParams = ref(false);
 const errorMessage = ref("");
 /** 连续刷新失败被护栏暂停时置位，用独立提示条引导手动恢复。 */
 const refreshPaused = ref(false);
+/** 当前这一轮自动刷新是否正在请求（驱动徽章的「请求中」态）。 */
+const pollInFlight = ref(false);
+/** 上一次成功刷新的时间戳，徽章显示成 HH:mm:ss。 */
+const lastRefreshAt = ref<number | null>(null);
+/** 手动刷新按钮的三态：进行中 / 刚完成。 */
+const manualRefreshing = ref(false);
+const manualJustDone = ref(false);
+/** 刚发生变化的构建号，用于表格行短暂高亮。 */
+const changedBuilds = ref<number[]>([]);
 /** 操作提示改为浮层 toast：只占视觉，不挤压页面布局。 */
 const toasts = ref<ToastItem[]>([]);
 const toastQueue = createToastQueue({
@@ -135,14 +156,16 @@ const isPipeline = computed(() =>
 /** 刚触发、还没在构建列表里出现的构建；存在时构建列表保持自动刷新。 */
 const pendingBuild = ref<PendingBuild | null>(null);
 
-type AutoRefreshMode = "builds" | "stages" | "build" | "queue";
+type AutoRefreshMode = "builds" | "stages" | "build" | "queue" | "executors";
 
-/** 当前视图是否需要自动刷新：构建详情在跑、构建列表有构建中/刚触发、阶段有进行中，或队列页常驻。 */
+/** 当前视图是否需要自动刷新：构建详情在跑、构建列表有构建中/刚触发、阶段有进行中、执行器被占用，或队列页常驻。 */
 const autoRefreshMode = computed<AutoRefreshMode | null>(() => {
   if (view.value === "build" && shouldPollBuildDetail(selectedBuild.value)) {
     return "build";
   }
   if (view.value === "queue") return "queue";
+  // 概览页只在有执行器被占用时轮询：全空闲时执行状态不会变，零请求。
+  if (view.value === "overview" && hasRunningExecutor(executors.value)) return "executors";
   if (view.value === "jobs" && selectedJob.value) {
     if (hasRunningBuild(builds.value)) return "builds";
     if (pendingBuild.value?.job === selectedJob.value.fullName) return "builds";
@@ -153,8 +176,6 @@ const autoRefreshMode = computed<AutoRefreshMode | null>(() => {
   return null;
 });
 
-const autoRefreshing = computed(() => autoRefreshMode.value !== null);
-
 let autoRefresher: AutoRefresher | null = null;
 
 let jobsToken = 0;
@@ -164,6 +185,64 @@ let buildToken = 0;
 
 function setError(error: unknown): void {
   errorMessage.value = errorText(describeError(error), locale.value);
+}
+
+/** 记录一次成功刷新，供徽章显示「上次更新」时间。 */
+function markRefreshed(): void {
+  lastRefreshAt.value = Date.now();
+}
+
+let lastBuildJob = "";
+let lastBuildRows: BuildSummary[] | null = null;
+let changedTimer: number | undefined;
+
+/**
+ * 写入构建列表并算出本次变化了哪些行。
+ * 只比较同一任务的前后两次数据，切任务时重置基线，避免整表高亮。
+ */
+function applyBuilds(job: string, next: BuildSummary[]): void {
+  const baseline = lastBuildJob === job ? lastBuildRows : null;
+  const changed = diffBuildRows(baseline, next);
+  lastBuildJob = job;
+  lastBuildRows = next;
+  builds.value = next;
+  if (!changed.length) return;
+  changedBuilds.value = changed;
+  if (changedTimer) window.clearTimeout(changedTimer);
+  changedTimer = window.setTimeout(() => {
+    changedBuilds.value = [];
+  }, 1600);
+}
+
+/** 清空构建列表与变化基线。 */
+function resetBuilds(): void {
+  builds.value = [];
+  buildStageSnapshot.value = null;
+  lastBuildJob = "";
+  lastBuildRows = null;
+  changedBuilds.value = [];
+}
+
+/**
+ * 拉取正在构建的那一次构建的阶段，供进度条按阶段步进。
+ * 只有 Pipeline 且确实有构建在跑时才发请求；拿不到阶段（Freestyle、未装
+ * pipeline-rest-api）就清空快照，进度回退到时长估算。
+ */
+async function loadBuildStages(job: string, list: BuildSummary[]): Promise<void> {
+  const running = isPipeline.value ? list.find((build) => build.building) : undefined;
+  if (!running) {
+    buildStageSnapshot.value = null;
+    return;
+  }
+  try {
+    const result = await jenkinsApi.buildStages(job, running.number, POLL_TIMEOUT_MS);
+    if (selectedJob.value?.fullName !== job) return;
+    buildStageSnapshot.value = { number: running.number, stages: result.stages ?? [] };
+  } catch {
+    // 阶段只是进度的加分项：失败要静默回退，不能冒泡给轮询护栏，
+    // 否则一个非核心请求会把整个自动刷新停掉。
+    if (selectedJob.value?.fullName === job) buildStageSnapshot.value = null;
+  }
 }
 
 /** 成功提示走 success，纯提示（只读拦截等）走 info。 */
@@ -194,6 +273,7 @@ async function loadJobs(path: string, silent = false): Promise<void> {
 
     jobs.value = result.jobs;
     folder.value = path;
+    markRefreshed();
 
     const current = selectedJob.value?.fullName;
     const stillThere = current
@@ -205,7 +285,7 @@ async function loadJobs(path: string, silent = false): Promise<void> {
         void selectJob(first, silent);
       } else {
         selectedJob.value = null;
-        builds.value = [];
+        resetBuilds();
         selectedBuild.value = null;
         stageMatrix.value = null;
       }
@@ -242,7 +322,7 @@ async function activateView(name: string): Promise<void> {
   selectedJob.value = null;
   selectedBuild.value = null;
   stageMatrix.value = null;
-  builds.value = [];
+  resetBuilds();
   pendingBuild.value = null;
   view.value = "jobs";
   await loadJobs("");
@@ -253,11 +333,34 @@ async function loadOverview(): Promise<void> {
   errorMessage.value = "";
   try {
     overview.value = await jenkinsApi.overview();
+    markRefreshed();
   } catch (error) {
     setError(error);
   } finally {
     loadingView.value = false;
   }
+}
+
+/**
+ * 拉取执行器槽位明细，供概览页「构建执行状态」面板使用。
+ * 独立加载态：面板失败不该把整页概览数字一起拖成错误页。
+ */
+async function loadExecutors(): Promise<void> {
+  loadingExecutors.value = true;
+  try {
+    const result = await jenkinsApi.executors();
+    executors.value = result.executors;
+    markRefreshed();
+  } catch (error) {
+    setError(error);
+  } finally {
+    loadingExecutors.value = false;
+  }
+}
+
+/** 概览页刷新入口：聚合数字与执行器明细一起刷。 */
+async function refreshOverview(): Promise<void> {
+  await Promise.all([loadOverview(), loadExecutors()]);
 }
 
 async function loadQueue(): Promise<void> {
@@ -266,6 +369,7 @@ async function loadQueue(): Promise<void> {
   try {
     const result = await jenkinsApi.queue();
     queueItems.value = result.items;
+    markRefreshed();
   } catch (error) {
     setError(error);
   } finally {
@@ -279,6 +383,7 @@ async function loadNodes(): Promise<void> {
   try {
     const result = await jenkinsApi.nodes();
     nodes.value = result.nodes;
+    markRefreshed();
   } catch (error) {
     setError(error);
   } finally {
@@ -286,15 +391,62 @@ async function loadNodes(): Promise<void> {
   }
 }
 
+/** 上一次执行进入刷新的页面：只有同一页重复进入才节流。 */
+let lastEnterView: AppView | null = null;
+/** 进入刷新进行中：防止连点侧栏叠出多轮请求。 */
+let enterRefreshBusy = false;
+
+/**
+ * 进入页面时补刷一次当前页的数据。
+ *
+ * - 节流：换页必刷；同一页距上次成功刷新（含自动轮询）不足 2s 才跳过；
+ * - 任务页保留当前文件夹位置，任务列表与选中任务的构建列表都静默刷新，
+ *   不闪加载骨架；静默失败的提示交给手动刷新，不打断浏览；
+ * - 结束时重置轮询倒计时，避免紧接着又排一轮、两个请求撞在一起。
+ */
+async function refreshOnEnter(): Promise<void> {
+  if (enterRefreshBusy) return;
+  const target = view.value;
+  const actions = resolveEnterActions(target, {
+    hasViews: views.value.length > 0,
+    hasSelection: selectedJob.value !== null,
+  });
+  if (!actions.length) return;
+  if (
+    !shouldRefreshOnEnter(target, { view: lastEnterView, at: lastRefreshAt.value }, Date.now())
+  ) {
+    return;
+  }
+
+  enterRefreshBusy = true;
+  try {
+    // loadJobs 可能因选中任务已消失而自动重选：那种情况详情已经拉过，不再重复请求。
+    const detailToken = selectToken;
+    for (const action of actions) {
+      if (action === "views") await loadViews();
+      else if (action === "jobs") await loadJobs(folder.value, true);
+      else if (action === "overview") await loadOverview();
+      else if (action === "executors") await loadExecutors();
+      else if (action === "queue") await loadQueue();
+      else if (action === "nodes") await loadNodes();
+      else if (action === "detail" && selectedJob.value && selectToken === detailToken) {
+        await selectJob({ fullName: selectedJob.value.fullName }, true);
+      }
+    }
+  } finally {
+    enterRefreshBusy = false;
+    lastEnterView = target;
+    autoRefresher?.restart();
+  }
+
+  // 刷新期间用户又切了页：刚刷完的是旧页，给新页补一次。
+  if (target !== view.value) void refreshOnEnter();
+}
+
+/** 侧栏导航：切页后按当前页补刷一次。 */
 async function switchView(next: "overview" | "jobs" | "queue" | "nodes"): Promise<void> {
   view.value = next;
-  if (next === "overview") await loadOverview();
-  else if (next === "queue") await loadQueue();
-  else if (next === "nodes") await loadNodes();
-  else if (next === "jobs") {
-    if (!views.value.length) await loadViews();
-    if (!jobs.value.length) await loadJobs("");
-  }
+  await refreshOnEnter();
 }
 
 async function cancelQueueItem(id: number): Promise<void> {
@@ -318,7 +470,7 @@ async function loadIdentity(): Promise<void> {
       version: result.user?.version ?? "",
       mode: result.user?.mode ?? "",
     };
-    await Promise.all([loadOverview(), loadViews()]);
+    await Promise.all([refreshOverview(), loadViews()]);
   } catch (error) {
     setError(error);
   }
@@ -348,8 +500,10 @@ async function selectJob(
     ]);
     if (token !== selectToken) return;
     selectedJob.value = detail;
-    builds.value = list.builds;
+    applyBuilds(job.fullName, list.builds);
+    markRefreshed();
     settlePendingBuild(job.fullName, list.builds);
+    void loadBuildStages(job.fullName, list.builds);
   } catch (error) {
     if (token === selectToken && !silent) setError(error);
   } finally {
@@ -359,6 +513,15 @@ async function selectJob(
       loadingBuilds.value = false;
     }
   }
+}
+
+/**
+ * 点执行器行跳到对应任务。
+ * 任务不在左侧当前视图的过滤结果里也能打开：selectJob 按 fullName 直取，不依赖列表。
+ */
+async function openExecutorJob(row: ExecutorInfo): Promise<void> {
+  if (!row.jobName) return;
+  await selectJob({ fullName: row.jobName });
 }
 
 async function refreshJob(silent = false): Promise<void> {
@@ -408,6 +571,12 @@ function closeBuild(): void {
   void refreshJob(true);
 }
 
+/** 阶段视图返回任务列表：阶段页期间列表没有轮询，回来同样补一次静默刷新。 */
+async function backToJobs(): Promise<void> {
+  view.value = "jobs";
+  await refreshJob(true);
+}
+
 async function loadStages(job: string): Promise<void> {
   const token = ++stageToken;
   loadingStages.value = true;
@@ -416,6 +585,7 @@ async function loadStages(job: string): Promise<void> {
     const matrix = await jenkinsApi.stages(job, 10);
     if (token !== stageToken) return;
     stageMatrix.value = matrix;
+    markRefreshed();
   } catch (error) {
     if (token !== stageToken) return;
     stageMatrix.value = null;
@@ -440,45 +610,41 @@ function settlePendingBuild(job: string, list: BuildSummary[]): void {
   if (shouldRefreshJobsAfterPending(status)) void loadJobs(folder.value, true);
 }
 
-/** 静默刷新构建列表 + 任务详情：不置 loading，失败不弹错误。 */
+/**
+ * 静默刷新构建列表 + 任务详情：不置 loading，失败不弹错误。
+ * 错误必须抛给轮询器：护栏靠它计数，徽章也靠它退出「请求中」。
+ */
 async function pollBuilds(): Promise<void> {
   const job = selectedJob.value?.fullName;
   if (!job || view.value !== "jobs" || pageHidden()) return;
   const token = selectToken;
-  try {
-    const [detail, list] = await Promise.all([
-      jenkinsApi.job(job, POLL_TIMEOUT_MS),
-      jenkinsApi.builds(job, 20, POLL_TIMEOUT_MS),
-    ]);
-    if (view.value !== "jobs" || selectedJob.value?.fullName !== job) return;
-    // 期间若手动刷新过，已有更新的一份落了盘，别用旧响应覆盖。
-    if (token !== selectToken) return;
-    selectedJob.value = detail;
-    builds.value = list.builds;
-    settlePendingBuild(job, list.builds);
-  } catch {
-    // 自动刷新失败保持现有数据，下一轮继续重试。
-  }
+  const [detail, list] = await Promise.all([
+    jenkinsApi.job(job, POLL_TIMEOUT_MS),
+    jenkinsApi.builds(job, 20, POLL_TIMEOUT_MS),
+  ]);
+  if (view.value !== "jobs" || selectedJob.value?.fullName !== job) return;
+  // 期间若手动刷新过，已有更新的一份落了盘，别用旧响应覆盖。
+  if (token !== selectToken) return;
+  selectedJob.value = detail;
+  applyBuilds(job, list.builds);
+  settlePendingBuild(job, list.builds);
+  void loadBuildStages(job, list.builds);
 }
 
-/** 静默刷新阶段矩阵；不抢占 stageToken，手动刷新会让本轮旧响应作废。 */
+/** 静默刷新阶段矩阵；不抢占 stageToken，手动刷新会让本轮旧响应作废。错误交给轮询器计数。 */
 async function pollStages(): Promise<void> {
   const job = selectedJob.value?.fullName;
   if (!job || view.value !== "stages" || pageHidden()) return;
   const token = stageToken;
-  try {
-    const matrix = await jenkinsApi.stages(job, 10, POLL_TIMEOUT_MS);
-    if (
-      token !== stageToken ||
-      view.value !== "stages" ||
-      selectedJob.value?.fullName !== job
-    ) {
-      return;
-    }
-    stageMatrix.value = matrix;
-  } catch {
-    // 同上，静默重试。
+  const matrix = await jenkinsApi.stages(job, 10, POLL_TIMEOUT_MS);
+  if (
+    token !== stageToken ||
+    view.value !== "stages" ||
+    selectedJob.value?.fullName !== job
+  ) {
+    return;
   }
+  stageMatrix.value = matrix;
 }
 
 /** 静默刷新构建详情；构建结束后 autoRefreshMode 自然变 null，轮询自动停。 */
@@ -487,26 +653,26 @@ async function pollBuildDetail(): Promise<void> {
   const number = selectedBuild.value?.number;
   if (!job || number === undefined || view.value !== "build" || pageHidden()) return;
   const token = buildToken;
-  try {
-    const detail = await jenkinsApi.build(job, number, POLL_TIMEOUT_MS);
-    if (token !== buildToken || view.value !== "build") return;
-    if (selectedBuild.value?.number !== number) return;
-    selectedBuild.value = detail;
-  } catch {
-    // 失败保留现有数据，下一轮重试（连续失败由护栏统一处理）。
-  }
+  const detail = await jenkinsApi.build(job, number, POLL_TIMEOUT_MS);
+  if (token !== buildToken || view.value !== "build") return;
+  if (selectedBuild.value?.number !== number) return;
+  selectedBuild.value = detail;
 }
 
 /** 静默刷新构建队列：排队项随时进出，固定轮询不看内容。 */
 async function pollQueue(): Promise<void> {
   if (view.value !== "queue" || pageHidden()) return;
-  try {
-    const result = await jenkinsApi.queue(POLL_TIMEOUT_MS);
-    if (view.value !== "queue") return;
-    queueItems.value = result.items;
-  } catch {
-    // 静默重试。
-  }
+  const result = await jenkinsApi.queue(POLL_TIMEOUT_MS);
+  if (view.value !== "queue") return;
+  queueItems.value = result.items;
+}
+
+/** 静默刷新执行器明细：概览页有槽位被占用时轮询，全空闲后自动停。 */
+async function pollExecutors(): Promise<void> {
+  if (view.value !== "overview" || pageHidden()) return;
+  const result = await jenkinsApi.executors(POLL_TIMEOUT_MS);
+  if (view.value !== "overview") return;
+  executors.value = result.executors;
 }
 
 /** 连续失败多少次后判定 Jenkins 不可用并暂停轮询。 */
@@ -522,6 +688,7 @@ const AUTO_REFRESH_TASKS: Record<AutoRefreshMode, () => Promise<void>> = {
   build: pollBuildDetail,
   stages: pollStages,
   queue: pollQueue,
+  executors: pollExecutors,
 };
 
 const AUTO_REFRESH_INTERVALS: Record<AutoRefreshMode, number> = {
@@ -529,6 +696,7 @@ const AUTO_REFRESH_INTERVALS: Record<AutoRefreshMode, number> = {
   build: AUTO_REFRESH_INTERVAL_MS,
   stages: STAGE_AUTO_REFRESH_INTERVAL_MS,
   queue: QUEUE_AUTO_REFRESH_INTERVAL_MS,
+  executors: EXECUTOR_AUTO_REFRESH_INTERVAL_MS,
 };
 
 function startAutoRefresh(mode: AutoRefreshMode): void {
@@ -541,20 +709,49 @@ function startAutoRefresh(mode: AutoRefreshMode): void {
       // 不做自动恢复：Jenkins 不可用时继续打只会刷屏，交给用户手动确认。
       refreshPaused.value = true;
     },
+    onRunStart: () => {
+      pollInFlight.value = true;
+    },
+    onRunEnd: (ok) => {
+      pollInFlight.value = false;
+      if (ok) markRefreshed();
+    },
   });
   autoRefresher = refresher;
   refreshPaused.value = false;
   refresher.start();
 }
 
-/** 页面隐藏时停轮询（后台空转无意义），回到前台立即补一轮。 */
+const autoRefreshInterval = computed(() =>
+  autoRefreshMode.value ? AUTO_REFRESH_INTERVALS[autoRefreshMode.value] : 0,
+);
+
+/** 传给各视图的刷新 UI 状态：徽章与手动刷新按钮三态共用。 */
+const refreshUi = computed<RefreshUi>(() => ({
+  mode: autoRefreshMode.value,
+  paused: refreshPaused.value,
+  inFlight: pollInFlight.value,
+  lastAt: lastRefreshAt.value,
+  intervalMs: autoRefreshInterval.value,
+  refreshing: manualRefreshing.value,
+  refreshed: manualJustDone.value,
+}));
+
+/**
+ * 页面隐藏时停轮询（后台空转无意义），回到前台立即补一轮。
+ * 没有轮询的页面（概览、节点、空闲的任务页）也走进入刷新：
+ * 后台期间 Jenkins 上的变化不该等用户手动刷才可见。
+ */
 function handleVisibility(): void {
   if (pageHidden()) {
     stopAutoRefresh();
     return;
   }
   const mode = autoRefreshMode.value;
-  if (!mode) return;
+  if (!mode) {
+    void refreshOnEnter();
+    return;
+  }
   if (!autoRefresher?.active) startAutoRefresh(mode);
   autoRefresher?.trigger();
 }
@@ -570,6 +767,8 @@ watch(autoRefreshMode, (mode, previous) => {
   if (previous === "builds" && view.value === "jobs") {
     void loadJobs(folder.value, true);
   }
+  // 已经不需要轮询了，暂停提示也没有意义。
+  refreshPaused.value = false;
 });
 
 async function openStages(): Promise<void> {
@@ -903,7 +1102,7 @@ async function confirmDelete(): Promise<void> {
       showToast(t("jobDeleted"));
       deleteTarget.value = null;
       selectedJob.value = null;
-      builds.value = [];
+      resetBuilds();
       selectedBuild.value = null;
       stageMatrix.value = null;
       await loadJobs(folder.value);
@@ -921,24 +1120,43 @@ async function confirmDelete(): Promise<void> {
   }
 }
 
-async function refreshCurrent(): Promise<void> {
-  // 手动刷新视为用户确认环境已恢复：清暂停提示，必要时重建被护栏停掉的轮询器。
-  refreshPaused.value = false;
-  const mode = autoRefreshMode.value;
-  if (mode && !autoRefresher?.active) startAutoRefresh(mode);
+let manualDoneTimer: number | undefined;
 
-  if (view.value === "build") {
-    await refreshBuild();
-  } else if (view.value === "stages") {
-    void refreshStages();
-  } else if (view.value === "overview") {
-    await loadOverview();
-  } else if (view.value === "queue") {
-    await loadQueue();
-  } else if (view.value === "nodes") {
-    await loadNodes();
-  } else {
-    await refreshJob();
+/**
+ * 手动刷新：按钮三态（刷新 → 刷新中… → 已更新）。
+ * 手动刷新视为用户确认环境已恢复：清暂停提示，必要时重建被护栏停掉的轮询器。
+ */
+async function refreshCurrent(): Promise<void> {
+  if (manualRefreshing.value) return;
+  manualRefreshing.value = true;
+  manualJustDone.value = false;
+  try {
+    refreshPaused.value = false;
+    const mode = autoRefreshMode.value;
+    if (mode && !autoRefresher?.active) startAutoRefresh(mode);
+
+    if (view.value === "build") {
+      await refreshBuild();
+    } else if (view.value === "stages") {
+      await refreshStages();
+    } else if (view.value === "overview") {
+      await refreshOverview();
+    } else if (view.value === "queue") {
+      await loadQueue();
+    } else if (view.value === "nodes") {
+      await loadNodes();
+    } else {
+      await refreshJob();
+    }
+
+    markRefreshed();
+    manualJustDone.value = true;
+    if (manualDoneTimer) window.clearTimeout(manualDoneTimer);
+    manualDoneTimer = window.setTimeout(() => {
+      manualJustDone.value = false;
+    }, 1500);
+  } finally {
+    manualRefreshing.value = false;
   }
 }
 
@@ -980,6 +1198,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("dbx-plugin-env", handleEnv);
   document.removeEventListener("visibilitychange", handleVisibility);
+  if (changedTimer) window.clearTimeout(changedTimer);
+  if (manualDoneTimer) window.clearTimeout(manualDoneTimer);
   toastQueue.clear();
   pendingBuild.value = null;
   stopAutoRefresh();
@@ -1072,7 +1292,10 @@ onBeforeUnmount(() => {
           v-if="view === 'overview'"
           :overview="overview"
           :loading="loadingView"
-          @refresh="loadOverview"
+          :executors="executors"
+          :loading-executors="loadingExecutors"
+          @refresh="refreshOverview"
+          @open-executor="openExecutorJob"
         />
 
         <QueueView
@@ -1081,8 +1304,9 @@ onBeforeUnmount(() => {
           :loading="loadingView"
           :read-only="readOnly"
           :locale="locale"
+          :refresh="refreshUi"
           @cancel="cancelQueueItem"
-          @refresh="loadQueue"
+          @refresh="refreshCurrent"
         />
 
         <NodesView
@@ -1098,8 +1322,8 @@ onBeforeUnmount(() => {
           :matrix="stageMatrix"
           :loading="loadingStages"
           :locale="locale"
-          :auto-refreshing="autoRefreshing"
-          @back="view = 'jobs'"
+          :refresh="refreshUi"
+          @back="backToJobs"
           @refresh="refreshCurrent"
           @open-build="openBuild"
         />
@@ -1110,7 +1334,7 @@ onBeforeUnmount(() => {
             :job-full-name="selectedJob.fullName"
             :read-only="readOnly"
             :locale="locale"
-            :auto-refreshing="autoRefreshing"
+            :refresh="refreshUi"
             @back="closeBuild"
             @stop="stopBuild"
             @refresh="refreshCurrent"
@@ -1145,7 +1369,9 @@ onBeforeUnmount(() => {
             :read-only="readOnly"
             :is-pipeline="isPipeline"
             :locale="locale"
-            :auto-refreshing="autoRefreshing"
+            :refresh="refreshUi"
+            :changed-builds="changedBuilds"
+            :stage-snapshot="buildStageSnapshot"
             @build="triggerBuild()"
             @build-with-params="showParams = true"
             @stop="stopLastBuild"

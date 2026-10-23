@@ -63,7 +63,7 @@ func TestGetStageMatrix(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/job/demo/api/json":
-			if !strings.Contains(r.URL.Query().Get("tree"), "changeSets[items[commitId,msg,author[fullName]]]") {
+			if !strings.Contains(r.URL.Query().Get("tree"), "changeSets[items[commitId,msg,timestamp,date,affectedPaths,author[fullName]]]") {
 				t.Errorf("tree missing changeSet: %s", r.URL.Query().Get("tree"))
 			}
 			fmt.Fprint(w, `{"builds":[
@@ -192,7 +192,7 @@ func TestGetStageMatrixIncludesChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStageMatrix() error = %v", err)
 	}
-	if !strings.Contains(tree, "changeSets[items[commitId,msg,author[fullName]]]") {
+	if !strings.Contains(tree, "changeSets[items[commitId,msg,timestamp,date,affectedPaths,author[fullName]]]") {
 		t.Fatalf("tree missing changeSets details: %s", tree)
 	}
 	if len(matrix.Builds) != 2 {

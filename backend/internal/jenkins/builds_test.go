@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGetBuilds(t *testing.T) {
@@ -47,6 +48,30 @@ func TestGetBuilds(t *testing.T) {
 	}
 }
 
+// 构建列表要显示进度条，必须带上 estimatedDuration（Jenkins 侧估算耗时）。
+func TestGetBuildsReadsEstimatedDuration(t *testing.T) {
+	var tree string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tree = r.URL.Query().Get("tree")
+		fmt.Fprint(w, `{"builds":[
+			{"number":13,"result":null,"building":true,"timestamp":1700000000000,"duration":30000,"estimatedDuration":120000}
+		]}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	builds, err := client.GetBuilds(context.Background(), "demo", 5)
+	if err != nil {
+		t.Fatalf("GetBuilds() error = %v", err)
+	}
+	if !strings.Contains(tree, "estimatedDuration") {
+		t.Fatalf("tree missing estimatedDuration: %s", tree)
+	}
+	if len(builds) != 1 || builds[0].EstimatedDuration != 120000 {
+		t.Fatalf("builds = %+v, want estimatedDuration 120000", builds)
+	}
+}
+
 func TestGetBuildsKeepsChangesInternal(t *testing.T) {
 	var tree string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +88,7 @@ func TestGetBuildsKeepsChangesInternal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBuilds() error = %v", err)
 	}
-	if !strings.Contains(tree, "changeSets[items[commitId,msg,author[fullName]]]") {
+	if !strings.Contains(tree, "changeSets[items[commitId,msg,timestamp,date,affectedPaths,author[fullName]]]") {
 		t.Fatalf("tree missing changeSets details: %s", tree)
 	}
 	if len(builds) != 1 || builds[0].CommitCount != 2 {
@@ -99,7 +124,7 @@ func TestGetBuildDetailReadsChangeSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBuild() error = %v", err)
 	}
-	if !strings.Contains(tree, "changeSets[items[commitId,msg,author[fullName]]]") {
+	if !strings.Contains(tree, "changeSets[items[commitId,msg,comment,timestamp,date,affectedPaths,author[fullName]]]") {
 		t.Fatalf("tree missing changeSets details: %s", tree)
 	}
 	if len(build.ChangeSet) != 1 {
@@ -161,5 +186,132 @@ func TestGetBuildsDefaultLimit(t *testing.T) {
 	}
 	if !strings.Contains(tree, "{0,20}") {
 		t.Errorf("tree = %q, want default range {0,20}", tree)
+	}
+}
+
+// 构建详情要把提交时间、改动文件数、正文一起取回来；这三样在 changeSet 里分别是
+// timestamp / affectedPaths / comment，缺一个前端就只能显示裸哈希。
+func TestGetBuildDetailReadsChangeDetails(t *testing.T) {
+	var tree string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tree = r.URL.Query().Get("tree")
+		fmt.Fprint(w, `{
+			"number":3,"result":"SUCCESS","building":false,
+			"changeSets":[{"items":[{
+				"commitId":"8e45f64f84f0a6c4515058d3cf8043ef8eb90527",
+				"msg":"probe B: 第二条提交",
+				"comment":"probe B: 第二条提交\n\n- 明细一：验证多行消息的展示\n- 明细二：应默认折叠为单行摘要\n",
+				"timestamp":1792659786000,
+				"date":"2026-10-22 17:03:06 +0800",
+				"author":{"fullName":"源哥"},
+				"affectedPaths":["a.txt","b/c.java"]
+			}]}]
+		}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	build, err := client.GetBuild(context.Background(), "demo", 3)
+	if err != nil {
+		t.Fatalf("GetBuild() error = %v", err)
+	}
+	for _, want := range []string{"comment", "timestamp", "date", "affectedPaths", "author[fullName]"} {
+		if !strings.Contains(tree, want) {
+			t.Errorf("tree missing %q: %s", want, tree)
+		}
+	}
+	if len(build.ChangeSet) != 1 {
+		t.Fatalf("changeSet = %d, want 1", len(build.ChangeSet))
+	}
+	change := build.ChangeSet[0]
+	if change.Timestamp != 1792659786000 {
+		t.Errorf("timestamp = %d, want 1792659786000", change.Timestamp)
+	}
+	if change.FileCount != 2 {
+		t.Errorf("fileCount = %d, want 2", change.FileCount)
+	}
+	if change.Message != "probe B: 第二条提交" {
+		t.Errorf("message = %q, want subject line", change.Message)
+	}
+	wantBody := "- 明细一：验证多行消息的展示\n- 明细二：应默认折叠为单行摘要"
+	if change.Body != wantBody {
+		t.Errorf("body = %q, want %q", change.Body, wantBody)
+	}
+}
+
+// 有些 SCM 只给 date 字符串（如 "2026-10-22 17:03:06 +0800"），没有 timestamp；
+// 必须由后端归一化成 epoch 毫秒，前端 new Date() 解析这个格式并不通用。
+func TestGetBuildChangeTimestampFallsBackToDate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"number":1,"result":"SUCCESS","building":false,
+			"changeSet":{"items":[{"commitId":"abc","msg":"fix","date":"2026-10-22 17:03:06 +0800"}]}}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	build, err := client.GetBuild(context.Background(), "demo", 1)
+	if err != nil {
+		t.Fatalf("GetBuild() error = %v", err)
+	}
+	if len(build.ChangeSet) != 1 {
+		t.Fatalf("changeSet = %d, want 1", len(build.ChangeSet))
+	}
+	want := time.Date(2026, 10, 22, 17, 3, 6, 0, time.FixedZone("", 8*3600)).UnixMilli()
+	if build.ChangeSet[0].Timestamp != want {
+		t.Errorf("timestamp = %d, want %d", build.ChangeSet[0].Timestamp, want)
+	}
+}
+
+// 单行提交没有正文；comment 与 msg 完全相同时不能重复展示一遍。
+func TestGetBuildChangeBodyEmptyForSingleLine(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"number":1,"result":"SUCCESS","building":false,
+			"changeSet":{"items":[{"commitId":"abc","msg":"fix bug","comment":"fix bug\n"}]}}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	build, err := client.GetBuild(context.Background(), "demo", 1)
+	if err != nil {
+		t.Fatalf("GetBuild() error = %v", err)
+	}
+	if got := build.ChangeSet[0].Body; got != "" {
+		t.Errorf("body = %q, want empty", got)
+	}
+}
+
+// 阶段矩阵是 10 次构建 × N 条提交，绝不能把正文塞进去：既不请求 comment，也要清空 Body。
+func TestGetStageMatrixDropsChangeBody(t *testing.T) {
+	var tree string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/job/demo/api/json" {
+			tree = r.URL.Query().Get("tree")
+			fmt.Fprint(w, `{"builds":[{"number":2,"result":"SUCCESS","building":false,
+				"changeSet":{"items":[{"commitId":"abc","msg":"fix bug",
+					"comment":"fix bug\n\n- 不该出现在矩阵里",
+					"timestamp":1792659786000,"affectedPaths":["a.txt"]}]}}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"stages":[{"name":"Build","status":"SUCCESS","durationMillis":100}]}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	matrix, err := client.GetStageMatrix(context.Background(), "demo", 10)
+	if err != nil {
+		t.Fatalf("GetStageMatrix() error = %v", err)
+	}
+	if strings.Contains(tree, "comment") {
+		t.Errorf("matrix tree should not request comment: %s", tree)
+	}
+	if len(matrix.Builds) != 1 || len(matrix.Builds[0].Changes) != 1 {
+		t.Fatalf("builds = %+v, want one change", matrix.Builds)
+	}
+	change := matrix.Builds[0].Changes[0]
+	if change.Body != "" {
+		t.Errorf("matrix body = %q, want empty", change.Body)
+	}
+	if change.Timestamp != 1792659786000 || change.FileCount != 1 {
+		t.Errorf("change = %+v, want timestamp and fileCount kept", change)
 	}
 }

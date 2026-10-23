@@ -2,8 +2,12 @@
 import { computed } from "vue";
 import { t } from "../i18n";
 import { formatDuration, formatTimestamp } from "../lib/format";
+import { buildProgress, type BuildProgress } from "../lib/progress";
+import type { RefreshUi } from "../lib/refreshStatus";
 import { statusMeta } from "../lib/status";
-import type { BuildSummary, JobDetail } from "../types";
+import type { BuildSummary, JobDetail, StageInfo } from "../types";
+import BuildProgressBar from "./BuildProgressBar.vue";
+import RefreshBadge from "./RefreshBadge.vue";
 
 const props = defineProps<{
   job: JobDetail;
@@ -12,7 +16,10 @@ const props = defineProps<{
   readOnly: boolean;
   isPipeline: boolean;
   locale: "zh" | "en";
-  autoRefreshing: boolean;
+  refresh: RefreshUi;
+  changedBuilds: number[];
+  /** 正在构建的那一次构建的阶段快照；有就按阶段步进，没有则回退时长估算。 */
+  stageSnapshot: { number: number; stages: StageInfo[] } | null;
 }>();
 
 const emit = defineEmits<{
@@ -31,6 +38,17 @@ const lastBuild = computed(() => props.job.lastBuild ?? null);
 const buildLabel = computed(() =>
   parameters.value.length > 0 ? t("buildWithParams") : t("buildNow"),
 );
+
+/** 每行构建的进度；已完成的构建为 null，列表显示「—」。 */
+const progressByNumber = computed(() => {
+  const snapshot = props.stageSnapshot;
+  const map = new Map<number, BuildProgress | null>();
+  for (const build of props.builds) {
+    const stages = snapshot?.number === build.number ? snapshot.stages : null;
+    map.set(build.number, buildProgress(build, stages));
+  }
+  return map;
+});
 
 function triggerBuild(): void {
   if (parameters.value.length > 0) {
@@ -90,7 +108,21 @@ function triggerBuild(): void {
         >
           {{ t("deleteJob") }}
         </button>
-        <button type="button" class="ghost" @click="emit('refresh')">{{ t("refresh") }}</button>
+        <button
+          type="button"
+          class="ghost"
+          :class="{ done: refresh.refreshed }"
+          :disabled="refresh.refreshing"
+          @click="emit('refresh')"
+        >
+          {{
+            refresh.refreshing
+              ? t("refreshing")
+              : refresh.refreshed
+                ? t("refreshed")
+                : t("refresh")
+          }}
+        </button>
       </div>
     </header>
 
@@ -140,10 +172,13 @@ function triggerBuild(): void {
       <div class="panel-head">
         <h2>{{ t("builds") }}</h2>
         <span class="panel-meta">
-          <span v-if="autoRefreshing" class="auto-refresh">
-            <span class="pulse" />
-            {{ t("autoRefreshing") }}
-          </span>
+          <RefreshBadge
+            :mode="refresh.mode"
+            :paused="refresh.paused"
+            :in-flight="refresh.inFlight"
+            :last-at="refresh.lastAt"
+            :interval-ms="refresh.intervalMs"
+          />
           <span class="count">{{ builds.length }}</span>
         </span>
       </div>
@@ -154,18 +189,27 @@ function triggerBuild(): void {
           <tr>
             <th>#</th>
             <th>{{ t("status") }}</th>
+            <th>{{ t("progress") }}</th>
             <th>{{ t("startedAt") }}</th>
             <th>{{ t("duration") }}</th>
             <th>{{ t("cause") }}</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="build in builds" :key="build.number" @click="emit('openBuild', build.number)">
+          <tr
+            v-for="build in builds"
+            :key="build.number"
+            :class="{ changed: changedBuilds.includes(build.number) }"
+            @click="emit('openBuild', build.number)"
+          >
             <td class="number">#{{ build.number }}</td>
             <td>
               <span class="status-pill small" :data-tone="statusMeta(build.status).tone">
                 {{ t(statusMeta(build.status).key) }}
               </span>
+            </td>
+            <td class="progress-cell">
+              <BuildProgressBar :progress="progressByNumber.get(build.number) ?? null" />
             </td>
             <td>{{ formatTimestamp(build.timestamp, locale) }}</td>
             <td>{{ formatDuration(build.duration) }}</td>
@@ -293,6 +337,18 @@ h1 {
   color: var(--accent);
 }
 
+.ghost:disabled {
+  opacity: 0.55;
+  cursor: default;
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.ghost.done {
+  border-color: var(--success);
+  color: var(--success);
+}
+
 .ghost.danger-text {
   color: var(--danger);
 }
@@ -401,35 +457,6 @@ h2 {
   gap: 10px;
 }
 
-.auto-refresh {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--success);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.pulse {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--success);
-  animation: auto-refresh-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes auto-refresh-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-    transform: scale(0.8);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
 .empty {
   margin: 8px 0;
   color: var(--muted);
@@ -498,15 +525,42 @@ h2 {
 
 .builds tbody tr {
   cursor: pointer;
+  transition: background-color 0.4s ease;
 }
 
 .builds tbody tr:hover {
   background: var(--panel-soft);
 }
 
+/* 新增或状态刚翻转的构建：左侧绿条短暂标注，之后自动淡出 */
+.builds tbody tr.changed {
+  background: color-mix(in srgb, var(--success) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--success);
+}
+
+.builds tbody tr.changed .status-pill {
+  animation: pill-flash 1.2s ease-out;
+}
+
+@keyframes pill-flash {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
 .number {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+}
+
+.progress-cell {
+  width: 132px;
 }
 
 .cause {

@@ -135,6 +135,129 @@ func TestGetNodesFallbackIdleFlag(t *testing.T) {
 	}
 }
 
+func TestGetExecutors(t *testing.T) {
+	var path, tree string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		tree = r.URL.Query().Get("tree")
+		fmt.Fprintf(w, "%s", `{"computer":[
+			{"displayName":"","offline":false,"numExecutors":2,"executors":[
+				{"idle":false,"currentExecutable":{"fullDisplayName":"团队 » demo-job #12","number":12,"url":"http://ci/jenkins/job/%E5%9B%A2%E9%98%9F/job/demo-job/12/","timestamp":1700000000000,"estimatedDuration":45000,"duration":18000,"building":true,"result":null}},
+				{"idle":true,"currentExecutable":null}
+			]},
+			{"displayName":"agent-1","offline":true,"numExecutors":1,"executors":[
+				{"idle":false,"currentExecutable":{"fullDisplayName":"team » release #7","number":7,"url":"/job/team/job/release/7/","timestamp":1700000001000,"estimatedDuration":120000,"duration":60000,"building":true,"result":null}}
+			]}
+		]}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	rows, err := client.GetExecutors(context.Background())
+	if err != nil {
+		t.Fatalf("GetExecutors() error = %v", err)
+	}
+	if path != "/computer/api/json" {
+		t.Errorf("path = %q, want /computer/api/json", path)
+	}
+	if !strings.Contains(tree, "currentExecutable[fullDisplayName") {
+		t.Errorf("tree = %q, want currentExecutable[fullDisplayName", tree)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows = %d, want 3 (空闲执行器也要占位)", len(rows))
+	}
+
+	first := rows[0]
+	if first.Node != "" || first.Index != 1 || first.Idle || first.Pending {
+		t.Errorf("row 0 = %+v, want 内置节点 #1 构建中", first)
+	}
+	// fullDisplayName 用的是「父 » 子」的展示名，不能当 fullName 用，必须从 url 反解。
+	if first.JobName != "团队/demo-job" || first.BuildNumber != 12 || !first.Building {
+		t.Errorf("row 0 = %+v, want 团队/demo-job #12 building", first)
+	}
+	if first.Duration != 18000 || first.EstimatedDuration != 45000 {
+		t.Errorf("row 0 timing = %+v, want 18000/45000", first)
+	}
+
+	second := rows[1]
+	if !second.Idle || second.Index != 2 || second.JobName != "" || second.BuildNumber != 0 {
+		t.Errorf("row 1 = %+v, want 空闲 #2", second)
+	}
+
+	third := rows[2]
+	if third.Node != "agent-1" || !third.NodeOffline {
+		t.Errorf("row 2 = %+v, want offline agent-1", third)
+	}
+	if third.JobName != "team/release" || third.BuildNumber != 7 {
+		t.Errorf("row 2 = %+v, want team/release #7", third)
+	}
+}
+
+func TestGetExecutorsPendingExecutable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 执行器已占位、构建对象还没建好：只有 url，没有 number / fullDisplayName。
+		fmt.Fprint(w, `{"computer":[{"displayName":"","offline":false,"numExecutors":1,"executors":[
+			{"idle":false,"currentExecutable":{"url":"http://ci/queue/item/42/"}}
+		]}]}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, true)
+	rows, err := client.GetExecutors(context.Background())
+	if err != nil {
+		t.Fatalf("GetExecutors() error = %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if !rows[0].Pending || rows[0].Idle || rows[0].JobName != "" || rows[0].BuildNumber != 0 {
+		t.Fatalf("row = %+v, want pending placeholder", rows[0])
+	}
+}
+
+func TestJobFullNameFromURL(t *testing.T) {
+	cases := []struct {
+		name     string
+		url      string
+		expected string
+	}{
+		{"顶层任务（绝对地址）", "http://ci/job/demo-job/12/", "demo-job"},
+		{"带 context path", "http://ci/jenkins/job/demo-job/12/", "demo-job"},
+		{"文件夹任务", "http://ci/job/Builds/job/anjun-web/12/", "Builds/anjun-web"},
+		{"三层文件夹", "http://ci/job/a/job/b/job/c/9/", "a/b/c"},
+		{"相对地址", "/job/team/job/release/7/", "team/release"},
+		{"URL 编码的中文", "http://ci/job/%E5%9B%A2%E9%98%9F/job/demo/12/", "团队/demo"},
+		{"缺尾斜杠", "http://ci/job/demo/12", "demo"},
+		{"带查询串", "http://ci/job/demo/12/?foo=bar", "demo"},
+		{"队列项占位没有 job 段", "http://ci/queue/item/42/", ""},
+		{"空串", "", ""},
+	}
+	for _, c := range cases {
+		if got := jobFullNameFromURL(c.url); got != c.expected {
+			t.Errorf("%s: jobFullNameFromURL(%q) = %q, want %q", c.name, c.url, got, c.expected)
+		}
+	}
+}
+
+func TestJobNameFromDisplayName(t *testing.T) {
+	cases := []struct {
+		display  string
+		number   int
+		expected string
+	}{
+		{"demo-job #12", 12, "demo-job"},
+		{"team/release #7", 7, "team/release"},
+		{"任务 带空格 #3", 3, "任务 带空格"},
+		{"demo-job", 0, "demo-job"},
+		{"", 0, ""},
+	}
+	for _, c := range cases {
+		if got := jobNameFromDisplayName(c.display, c.number); got != c.expected {
+			t.Errorf("jobNameFromDisplayName(%q, %d) = %q, want %q", c.display, c.number, got, c.expected)
+		}
+	}
+}
+
 func TestGetOverview(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/whoAmI/api/json", func(w http.ResponseWriter, r *http.Request) {

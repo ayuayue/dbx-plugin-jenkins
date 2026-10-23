@@ -5,16 +5,33 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
-// maxChangeMessageRunes 是变更信息截断上限，避免矩阵响应体过大。
-const maxChangeMessageRunes = 200
+const (
+	// maxChangeMessageRunes 是变更信息截断上限，避免矩阵响应体过大。
+	maxChangeMessageRunes = 200
+	// maxChangeBodyRunes 是提交正文截断上限：正文只在构建详情返回，防止超长说明撑大响应。
+	maxChangeBodyRunes = 2000
+)
+
+// changeItemsTree 是 changelog 条目的公共字段。
+// comment（完整正文）体积大，只在构建详情里请求，别加进列表/矩阵。
+const changeItemsTree = "items[commitId,msg,timestamp,date,affectedPaths,author[fullName]]"
+
+// changeDetailItemsTree 在公共字段上多取 comment，供构建详情展示提交正文。
+const changeDetailItemsTree = "items[commitId,msg,comment,timestamp,date,affectedPaths,author[fullName]]"
 
 // rawChange 是 Jenkins changelog 里的一条提交。
 type rawChange struct {
 	CommitID string `json:"commitId"`
-	Message  string `json:"msg"`
-	Author   struct {
+	// Message 只有首行（subject），完整多行说明在 Comment。
+	Message       string   `json:"msg"`
+	Comment       string   `json:"comment"`
+	Timestamp     int64    `json:"timestamp"`
+	Date          string   `json:"date"`
+	AffectedPaths []string `json:"affectedPaths"`
+	Author        struct {
 		FullName string `json:"fullName"`
 	} `json:"author"`
 }
@@ -24,12 +41,13 @@ type rawChangeSet struct {
 }
 
 type rawBuild struct {
-	Number      int    `json:"number"`
-	Result      string `json:"result"`
-	Building    bool   `json:"building"`
-	Timestamp   int64  `json:"timestamp"`
-	Duration    int64  `json:"duration"`
-	DisplayName string `json:"displayName"`
+	Number            int    `json:"number"`
+	Result            string `json:"result"`
+	Building          bool   `json:"building"`
+	Timestamp         int64  `json:"timestamp"`
+	Duration          int64  `json:"duration"`
+	EstimatedDuration int64  `json:"estimatedDuration"`
+	DisplayName       string `json:"displayName"`
 	Actions     []struct {
 		Causes []Cause `json:"causes"`
 	} `json:"actions"`
@@ -57,6 +75,8 @@ func (raw rawBuild) changes() []ChangeSetItem {
 	changes := mergeChanges(sets...)
 	for index := range changes {
 		changes[index].Message = truncateChangeMessage(changes[index].Message)
+		// 矩阵一次要装 10 次构建 × N 条提交，正文只属于构建详情，这里一律清掉。
+		changes[index].Body = ""
 	}
 	return changes
 }
@@ -80,9 +100,12 @@ func mergeChanges(sets ...[]rawChange) []ChangeSetItem {
 				seen[commitID] = true
 			}
 			changes = append(changes, ChangeSetItem{
-				CommitID: commitID,
-				Message:  strings.TrimSpace(item.Message),
-				Author:   strings.TrimSpace(item.Author.FullName),
+				CommitID:  commitID,
+				Message:   strings.TrimSpace(item.Message),
+				Author:    strings.TrimSpace(item.Author.FullName),
+				Timestamp: changeTimestamp(item),
+				FileCount: len(item.AffectedPaths),
+				Body:      changeBody(item.Comment, item.Message),
 			})
 		}
 	}
@@ -97,6 +120,49 @@ func truncateChangeMessage(message string) string {
 		return message
 	}
 	return string(runes[:maxChangeMessageRunes]) + "…"
+}
+
+// changeTimestamp 归一化提交时间：优先 timestamp（epoch 毫秒），
+// 其次解析 date 字符串（部分 SCM 只给 "2006-01-02 15:04:05 -0700"）。
+// 前端 new Date() 对后一种格式并不通用，所以统一在后端转成毫秒。
+func changeTimestamp(item rawChange) int64 {
+	if item.Timestamp > 0 {
+		return item.Timestamp
+	}
+	parsed, err := time.Parse("2006-01-02 15:04:05 -0700", strings.TrimSpace(item.Date))
+	if err != nil {
+		return 0
+	}
+	return parsed.UnixMilli()
+}
+
+// changeBody 返回提交正文。Jenkins 的 msg 只有首行，完整多行说明在 comment；
+// 首行与 msg 相同时剥掉，剩余部分按 rune 截断，避免超长说明撑大详情响应。
+// 注意先按原始文本切行：先 TrimSpace 会把单行 comment 的换行吃掉，误判成有正文。
+func changeBody(comment, subject string) string {
+	normalized := strings.ReplaceAll(comment, "\r\n", "\n")
+	if strings.TrimSpace(normalized) == "" {
+		return ""
+	}
+
+	firstLine, rest, hasMore := strings.Cut(normalized, "\n")
+	if !hasMore {
+		return ""
+	}
+
+	text := strings.TrimSpace(normalized)
+	if strings.TrimSpace(firstLine) == strings.TrimSpace(subject) {
+		text = strings.TrimSpace(rest)
+	}
+	if text == "" {
+		return ""
+	}
+
+	runes := []rune(text)
+	if len(runes) > maxChangeBodyRunes {
+		return string(runes[:maxChangeBodyRunes]) + "…"
+	}
+	return text
 }
 
 // GetBuilds 读取任务最近的构建列表。
@@ -114,8 +180,8 @@ func (c *Client) GetBuilds(ctx context.Context, fullName string, limit int) ([]B
 	}
 
 	tree := fmt.Sprintf(
-		"builds[number,result,building,timestamp,duration,displayName,actions[causes[shortDescription,userId,userName]],changeSet[items[commitId,msg,author[fullName]]],changeSets[items[commitId,msg,author[fullName]]]]{0,%d}",
-		limit,
+		"builds[number,result,building,timestamp,duration,estimatedDuration,displayName,actions[causes[shortDescription,userId,userName]],changeSet[%s],changeSets[%s]]{0,%d}",
+		changeItemsTree, changeItemsTree, limit,
 	)
 	var payload struct {
 		Builds []rawBuild `json:"builds"`
@@ -129,16 +195,17 @@ func (c *Client) GetBuilds(ctx context.Context, fullName string, limit int) ([]B
 	for _, raw := range payload.Builds {
 		changes := raw.changes()
 		builds = append(builds, BuildSummary{
-			Number:      raw.Number,
-			Result:      raw.Result,
-			Building:    raw.Building,
-			Timestamp:   raw.Timestamp,
-			Duration:    raw.Duration,
-			DisplayName: raw.DisplayName,
-			Causes:      raw.causes(),
-			Status:      StatusFromResult(raw.Result, raw.Building),
-			CommitCount: len(changes),
-			Changes:     changes,
+			Number:            raw.Number,
+			Result:            raw.Result,
+			Building:          raw.Building,
+			Timestamp:         raw.Timestamp,
+			Duration:          raw.Duration,
+			EstimatedDuration: raw.EstimatedDuration,
+			DisplayName:       raw.DisplayName,
+			Causes:            raw.causes(),
+			Status:            StatusFromResult(raw.Result, raw.Building),
+			CommitCount:       len(changes),
+			Changes:           changes,
 		})
 	}
 	return builds, nil
@@ -156,8 +223,8 @@ func (c *Client) GetBuild(ctx context.Context, fullName string, number int) (*Bu
 
 	tree := "number,result,building,timestamp,duration,estimatedDuration,displayName,fullDisplayName,url," +
 		"actions[causes[shortDescription,userId,userName]]," +
-		"changeSet[items[commitId,msg,author[fullName]]]," +
-		"changeSets[items[commitId,msg,author[fullName]]]," +
+		"changeSet[" + changeDetailItemsTree + "]," +
+		"changeSets[" + changeDetailItemsTree + "]," +
 		"artifacts[fileName,relativePath]"
 	var payload struct {
 		Number            int    `json:"number"`

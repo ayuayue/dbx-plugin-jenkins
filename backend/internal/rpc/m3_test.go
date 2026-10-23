@@ -37,7 +37,7 @@ func fakeJenkinsM3(t *testing.T) *httptest.Server {
 	})
 	mux.HandleFunc("/computer/api/json", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"computer":[
-			{"displayName":"Built-In Node","offline":false,"temporarilyOffline":false,"numExecutors":4,"idle":false,"assignedLabels":[{"name":"built-in"}],"offlineCauseReason":"","executors":[{"idle":false},{"idle":false},{"idle":true},{"idle":true}]},
+			{"displayName":"Built-In Node","offline":false,"temporarilyOffline":false,"numExecutors":4,"idle":false,"assignedLabels":[{"name":"built-in"}],"offlineCauseReason":"","executors":[{"idle":false,"currentExecutable":{"fullDisplayName":"demo #12","number":12,"url":"http://ci/job/demo/12/","timestamp":1700000000000,"estimatedDuration":45000,"duration":18000,"building":true,"result":null}},{"idle":false},{"idle":true},{"idle":true}]},
 			{"displayName":"agent-1","offline":true,"temporarilyOffline":true,"numExecutors":2,"idle":true,"assignedLabels":[{"name":"linux"}],"offlineCauseReason":"maintenance","executors":[{"idle":true},{"idle":true}]}
 		]}`)
 	})
@@ -122,6 +122,49 @@ func TestRPCQueueReadOnly(t *testing.T) {
 	_, rpcErr := service.Handle(context.Background(), "jenkins/cancelQueue", json.RawMessage(`{"connectionId":"conn-1","id":42}`))
 	if rpcErr == nil || rpcErr.Kind != "read_only" {
 		t.Fatalf("error = %+v, want read_only", rpcErr)
+	}
+}
+
+func TestRPCExecutors(t *testing.T) {
+	server := fakeJenkinsM3(t)
+	defer server.Close()
+	service := connectM2(t, server, true)
+
+	result, rpcErr := service.Handle(context.Background(), "jenkins/executors", json.RawMessage(`{"connectionId":"conn-1"}`))
+	if rpcErr != nil {
+		t.Fatalf("executors error = %+v", rpcErr)
+	}
+	payload := decodeResult[struct {
+		Executors []struct {
+			Node        string `json:"node"`
+			NodeOffline bool   `json:"nodeOffline"`
+			Index       int    `json:"index"`
+			Idle        bool   `json:"idle"`
+			JobName     string `json:"jobName"`
+			BuildNumber int    `json:"buildNumber"`
+			Building    bool   `json:"building"`
+			Pending     bool   `json:"pending"`
+		} `json:"executors"`
+	}](t, result)
+
+	// 两个节点共 4 + 2 个槽位，空闲槽位也要返回。
+	if len(payload.Executors) != 6 {
+		t.Fatalf("executors = %d, want 6", len(payload.Executors))
+	}
+	first := payload.Executors[0]
+	if first.Node != "Built-In Node" || first.Index != 1 || first.Idle || first.Pending {
+		t.Errorf("executor 0 = %+v, want Built-In Node #1 busy", first)
+	}
+	if first.JobName != "demo" || first.BuildNumber != 12 || !first.Building {
+		t.Errorf("executor 0 = %+v, want demo #12 building", first)
+	}
+	third := payload.Executors[2]
+	if !third.Idle || third.Index != 3 || third.JobName != "" {
+		t.Errorf("executor 2 = %+v, want #3 idle", third)
+	}
+	last := payload.Executors[5]
+	if last.Node != "agent-1" || !last.NodeOffline {
+		t.Errorf("executor 5 = %+v, want offline agent-1", last)
 	}
 }
 
