@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	userAgent   = "dbx-jenkins-plugin/0.6.0"
+	userAgent   = "dbx-jenkins-plugin/0.7.5"
 	maxJSONBody = 8 << 20
 )
 

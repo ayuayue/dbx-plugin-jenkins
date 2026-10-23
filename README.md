@@ -3,7 +3,7 @@
 在 DBX 内管理 Jenkins 任务、构建、控制台日志、队列与节点。
 
 - 插件 ID：`io.github.nixing178.jenkins`
-- 当前版本：`0.4.5`（进入页面自动刷新：切页 / 详情返回 / 回到前台各补刷一次，同页 2s 节流）
+- 当前版本：`0.7.5`（停止构建 / 取消排队的二次确认改为应用内弹窗，原生 `confirm` 在宿主 webview 里会被吞掉）
 - 形态：Go Sidecar + Vue3 静态工作台
 - 许可证：Apache-2.0
 
@@ -183,8 +183,10 @@ git push origin main --tags
 
 ## 本地安装
 
+> 面向最终用户的完整说明（校验和、验收清单、常见问题）：`docs/安装说明书-0.7.5.txt`。
+
 1. DBX → 插件中心 → 设置 → 打开「允许安装未签名开发包」。
-2. 插件中心 → 安装 → 从文件 → 选择 `dist/io.github.nixing178.jenkins-0.4.0-windows-x64.dbxp`。
+2. 插件中心 → 安装 → 从文件 → 选择 `dist/io.github.nixing178.jenkins-0.7.5-windows-x64.dbxp`。
 3. 新建连接，类型选 **Jenkins**，填写地址、端口、用户名与 API Token。
 4. 从 `com.anjun.jenkins` 旧版升级时：两者是不同插件，需先在插件中心卸载旧版，再安装新版。
 

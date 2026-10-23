@@ -14,7 +14,7 @@ if (theme === "dark") document.documentElement.dataset.theme = "dark";
 
 const overview: Overview = {
   version: "2.586",
-  user: "liaosiyuan",
+  user: "demo-user",
   mode: "NORMAL",
   nodeDescription: "master",
   quietingDown: false,
@@ -51,7 +51,7 @@ const executors: ExecutorInfo[] = [
     index: 1,
     idle: false,
     building: true,
-    jobName: "Builds/anjun-materials-web-admin",
+    jobName: "Builds/demo-materials-web",
     buildNumber: 632,
     estimatedDuration: 60_000,
     duration: 37_000,

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import logoUrl from "../assets/plugin.svg";
 import { describeError, jenkinsApi, setConnectionId } from "./api";
 import BuildView from "./components/BuildView.vue";
+import ConfirmAction from "./components/ConfirmAction.vue";
 import ConfirmDelete from "./components/ConfirmDelete.vue";
 import JobEditor from "./components/JobEditor.vue";
 import JobList from "./components/JobList.vue";
@@ -15,6 +16,14 @@ import StageView from "./components/StageView.vue";
 import ToastHost from "./components/ToastHost.vue";
 import ViewEditor from "./components/ViewEditor.vue";
 import { locale, syncLocale, t } from "./i18n";
+import {
+  createCancelRequest,
+  createStopRequest,
+  isStopTarget,
+  type CancelRequest,
+  type ConfirmRequest,
+  type StopRequest,
+} from "./lib/confirmRequest";
 import { resolveEnterActions, shouldRefreshOnEnter, type AppView } from "./lib/enterRefresh";
 import { errorText } from "./lib/errors";
 import { diffBuildRows, type RefreshUi } from "./lib/refreshStatus";
@@ -134,10 +143,40 @@ interface DeleteTarget {
 const jobEditor = ref<JobEditorState | null>(null);
 const viewEditor = ref<ViewEditorState | null>(null);
 const deleteTarget = ref<DeleteTarget | null>(null);
+/** 停止构建 / 取消排队项的二次确认目标（宿主 webview 会吞掉原生 confirm）。 */
+const pendingConfirm = ref<ConfirmRequest | null>(null);
+const confirmBusy = ref(false);
 const editorBusy = ref(false);
 const viewJobPool = ref<string[]>([]);
 
 const canManageView = computed(() => isNamedView(activeView.value));
+
+const confirmTitle = computed(() => {
+  const request = pendingConfirm.value;
+  if (!request) return "";
+  return request.kind === "stop"
+    ? t("stopConfirm", { number: request.number })
+    : t("cancelConfirm", { id: request.id });
+});
+
+/** 弹窗里点明操作对象，避免在多个任务间切来切去时停错构建。 */
+const confirmDetail = computed(() => {
+  const request = pendingConfirm.value;
+  if (!request) return "";
+  return request.kind === "stop" ? request.job : request.jobName;
+});
+
+const confirmHint = computed(() => {
+  const request = pendingConfirm.value;
+  if (!request) return "";
+  return request.kind === "stop" ? t("stopConfirmHint") : t("cancelConfirmHint");
+});
+
+const confirmActionLabel = computed(() => {
+  const request = pendingConfirm.value;
+  if (!request) return "";
+  return request.kind === "stop" ? t("stopAction") : t("cancelAction");
+});
 
 /** 已有视图名，用于编辑视图时的重名提示（Jenkins 判重区分大小写）。 */
 const viewNames = computed(() =>
@@ -449,15 +488,11 @@ async function switchView(next: "overview" | "jobs" | "queue" | "nodes"): Promis
   await refreshOnEnter();
 }
 
-async function cancelQueueItem(id: number): Promise<void> {
-  if (!window.confirm(t("cancelConfirm", { id }))) return;
-  try {
-    await jenkinsApi.cancelQueue(id);
-    showToast(t("cancelSuccess"));
-    await loadQueue();
-  } catch (error) {
-    setError(error);
-  }
+/** 队列「取消」只负责发起确认，真正调用在 confirmPending 里执行。 */
+function cancelQueueItem(id: number, jobName: string): void {
+  const request = createCancelRequest(id, jobName);
+  if (!request) return;
+  pendingConfirm.value = request;
 }
 
 async function loadIdentity(): Promise<void> {
@@ -805,18 +840,28 @@ async function triggerBuild(params: Record<string, unknown> = {}): Promise<void>
   }
 }
 
-async function stopBuild(number: number): Promise<void> {
-  const job = selectedJob.value?.fullName;
-  if (!job) return;
-  if (!window.confirm(t("stopConfirm", { number }))) return;
+/** 两个「停止」入口（任务页 / 构建页）都先弹确认，不直接发请求。 */
+function stopBuild(number: number): void {
+  const request = createStopRequest(selectedJob.value?.fullName, number);
+  if (!request) return;
+  pendingConfirm.value = request;
+}
+
+function stopLastBuild(): void {
+  const number = selectedJob.value?.lastBuild?.number;
+  if (number) stopBuild(number);
+}
+
+async function runStop(request: StopRequest): Promise<void> {
   try {
-    await jenkinsApi.stop(job, number);
+    await jenkinsApi.stop(request.job, request.number);
     showToast(t("stopSuccess"));
     // Jenkins 要过一小会儿才把状态改过来；延迟补刷，且只在目标未变时才刷。
     window.setTimeout(() => {
-      if (selectedJob.value?.fullName !== job) return;
+      // 用户中途切了任务就别刷错对象。
+      if (!isStopTarget(request, selectedJob.value?.fullName)) return;
       void refreshJob();
-      if (view.value === "build" && selectedBuild.value?.number === number) {
+      if (view.value === "build" && selectedBuild.value?.number === request.number) {
         void refreshBuild();
       }
     }, 800);
@@ -825,9 +870,33 @@ async function stopBuild(number: number): Promise<void> {
   }
 }
 
-async function stopLastBuild(): Promise<void> {
-  const number = selectedJob.value?.lastBuild?.number;
-  if (number) await stopBuild(number);
+async function runCancel(request: CancelRequest): Promise<void> {
+  try {
+    await jenkinsApi.cancelQueue(Number(request.id));
+    showToast(t("cancelSuccess"));
+    await loadQueue();
+  } catch (error) {
+    setError(error);
+  }
+}
+
+/** 确认弹窗的唯一执行入口：busy 期间挡住重复提交，结束后关窗。 */
+async function confirmPending(): Promise<void> {
+  const request = pendingConfirm.value;
+  if (!request || confirmBusy.value) return;
+  confirmBusy.value = true;
+  try {
+    if (request.kind === "stop") await runStop(request);
+    else await runCancel(request);
+  } finally {
+    confirmBusy.value = false;
+    pendingConfirm.value = null;
+  }
+}
+
+function cancelPending(): void {
+  if (confirmBusy.value) return;
+  pendingConfirm.value = null;
 }
 
 function submitParams(params: Record<string, unknown>): void {
@@ -1430,6 +1499,17 @@ onBeforeUnmount(() => {
       :busy="editorBusy"
       @confirm="confirmDelete"
       @cancel="deleteTarget = null"
+    />
+
+    <ConfirmAction
+      v-if="pendingConfirm"
+      :title="confirmTitle"
+      :detail="confirmDetail"
+      :hint="confirmHint"
+      :confirm-label="confirmActionLabel"
+      :busy="confirmBusy"
+      @confirm="confirmPending"
+      @cancel="cancelPending"
     />
 
     <ToastHost :items="toasts" @dismiss="dismissToast" />

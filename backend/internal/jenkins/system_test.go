@@ -223,7 +223,7 @@ func TestJobFullNameFromURL(t *testing.T) {
 	}{
 		{"顶层任务（绝对地址）", "http://ci/job/demo-job/12/", "demo-job"},
 		{"带 context path", "http://ci/jenkins/job/demo-job/12/", "demo-job"},
-		{"文件夹任务", "http://ci/job/Builds/job/anjun-web/12/", "Builds/anjun-web"},
+		{"文件夹任务", "http://ci/job/Builds/job/demo-web/12/", "Builds/demo-web"},
 		{"三层文件夹", "http://ci/job/a/job/b/job/c/9/", "a/b/c"},
 		{"相对地址", "/job/team/job/release/7/", "team/release"},
 		{"URL 编码的中文", "http://ci/job/%E5%9B%A2%E9%98%9F/job/demo/12/", "团队/demo"},

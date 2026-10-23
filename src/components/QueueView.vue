@@ -14,7 +14,7 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  cancel: [id: number];
+  cancel: [id: number, jobName: string];
   refresh: [];
 }>();
 </script>
@@ -82,7 +82,7 @@ const emit = defineEmits<{
               v-if="!readOnly"
               type="button"
               class="danger-link"
-              @click="emit('cancel', item.id)"
+              @click="emit('cancel', item.id, item.jobName)"
             >
               {{ t("cancel") }}
             </button>

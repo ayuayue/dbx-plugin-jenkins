@@ -239,8 +239,8 @@ E2E OK
 ## 绿测结果
 
 ```
-ok  github.com/anjun/jenkins/internal/jenkins
-ok  github.com/anjun/jenkins/internal/rpc
+ok  github.com/nixing178/dbx-plugin-jenkins/internal/jenkins
+ok  github.com/nixing178/dbx-plugin-jenkins/internal/rpc
 
 Test Files  6 passed (6)
 Tests       28 passed (28)
@@ -886,8 +886,8 @@ public final String getFullDisplayName() {
 }
 ```
 
-所以文件夹里的任务拿到的是 `Builds » anjun-web #12`，按 ` #N` 剥出来是 `Builds » anjun-web`，
-拼成 `/job/Builds » anjun-web` 必然 404（界面显示「Jenkins 地址、上下文路径或资源不存在」）。
+所以文件夹里的任务拿到的是 `Builds » demo-web #12`，按 ` #N` 剥出来是 `Builds » demo-web`，
+拼成 `/job/Builds » demo-web` 必然 404（界面显示「Jenkins 地址、上下文路径或资源不存在」）。
 自定义 displayName 的任务同样对不上。
 
 ### 修复
@@ -916,7 +916,7 @@ ok  internal/jenkins  1.176s
 ok  internal/rpc      0.750s
 ```
 
-`TestGetExecutors` 的 mock 换成真实形态（`Builds » anjun-web #12` + 编码过的 folder url），
+`TestGetExecutors` 的 mock 换成真实形态（`Builds » demo-web #12` + 编码过的 folder url），
 新增 `TestJobFullNameFromURL` 10 个用例：顶层 / context path / 文件夹 / 三层 / 相对地址 /
 URL 编码中文 / 缺尾斜杠 / 带查询串 / 队列占位 / 空串。
 
@@ -927,8 +927,8 @@ URL 编码中文 / 缺尾斜杠 / 带查询串 / 队列占位 / 空串。
 - mock Jenkins（`fullDisplayName` 用 `»`、url 用 folder 结构）→ 从包内 sidecar 走完整链路：
 
 ```
-[smoke] executors[0]: jobName="Builds/anjun-web" build=12
-[smoke] jenkins/job -> Builds/anjun-web (status building)
+[smoke] executors[0]: jobName="Builds/demo-web" build=12
+[smoke] jenkins/job -> Builds/demo-web (status building)
 [smoke] jenkins/build -> #12
 [smoke] ok: 文件夹任务名从 url 反解正确，跳转链路 200
 ```
@@ -1039,3 +1039,246 @@ pnpm build                 # [check-version] ok: 0.6.0，ui/index.html 235.25 kB
 - 包内 6 条目；`ui/index.html` 237,455 B 与本地逐字节一致（sha256 `75c6082b…`）。
 - 从包内提取 `bin/windows-x64/dbx-plugin-jenkins.exe`（8,579,072 B）→
   `[verify-sidecar] ok: io.github.nixing178.jenkins/0.6.0`。
+
+---
+
+## 0.7.0 · 控制台日志列表（2026-10-23）
+
+### 红 → 绿
+
+新增 `src/lib/logLines.test.ts`（27 例），先跑出模块缺失红：
+
+```
+FAIL src/lib/logLines.test.ts [ src/lib/logLines.test.ts ]
+Error: Failed to load url ./logLines ... Does the file exist?
+Test Files 1 failed (1) / Tests no tests
+```
+
+实现后一次断言修正：`ESC[22m` 只取消加粗、不重置前景色，绿色应延续（测试期望写错，非实现问题）。
+
+```
+✓ src/lib/logLines.test.ts (27 tests) 8ms
+```
+
+覆盖：ANSI CSI / OSC / 光标序列剥离、颜色与 bold 合并、未知 SGR 忽略、
+级别判定正反例（`0 errors` / `errorRate` 不误报）、过滤保号、命中行下标、行号起点。
+
+### 全量
+
+```
+vitest run     # 290 PASS（19 files）
+vue-tsc        # 0 错
+go test ./...  # ok（jenkins / rpc）
+pnpm build     # [check-version] ok: 0.7.0，ui/index.html 245.33 kB
+```
+
+### 交互（CDP，1280×1000，`?big=1` 共 6200 行）
+
+```
+初始：      rows=5000, first=1021, hint="仅显示最后 5000 行（行号为显示序号）。",
+            footer="6020 行 · 显示 5000 行"
+仅问题：    rows=1048, levels=[error,warn]
+搜索：      flaky-retry → 1/117，active=1032
+下一处：    2/117，active=1075（偏移 43 = 每轮行数）
+全屏：      fullscreen=true，log-body clientHeight=895
+Esc：       fullscreen=false
+DOM 顺序：  严格递增（sorted=true），单行高度 22px
+```
+
+### 预览
+
+- `docs/screenshots/console-list-preview.png`（浅色，42 行）
+- `docs/screenshots/console-big-default.png`（6200 行截断 + 折行悬挂缩进）
+- `docs/screenshots/console-big-problems.png`（仅问题）
+- `docs/screenshots/console-big-search.png`（搜索命中 + 自动取消跟随 + ↓ 最新）
+- `docs/screenshots/console-big-fullscreen.png`
+- 页面：`console-preview.html` + `src/console-preview-main.ts`（`?big=1` / `?theme=dark`）
+
+### 打包（0.7.0）
+
+- `dist/io.github.nixing178.jenkins-0.7.0-windows-x64.dbxp`，4,961,298 B，unsigned review candidate。
+- sha256 `3669bb85924e175e…`。
+- 包内 6 条目；`ui/index.html` 247,690 B 与本地逐字节一致（sha256 `ef9400e1f2f50248…`）。
+- 从包内提取 `bin/windows-x64/dbx-plugin-jenkins.exe`（8,579,072 B）→
+  `[verify-sidecar] ok: io.github.nixing178.jenkins/0.7.0`。
+
+---
+
+## 0.7.1 · 控制台日志区高度（2026-10-23）
+
+- 默认高度 `clamp(360px, 52vh, 720px)` → `clamp(420px, 64vh, 900px)`；
+  1000px 高窗口下 520px → 640px，可视行数约 +5 行。
+- `vue-tsc` 0 错；`pnpm build` → `[check-version] ok: 0.7.1`，`ui/index.html` 247,690 B
+  （与 0.7.0 同大小，仅 CSS 数字等长替换），产物内含 `clamp(420px,64vh,900px)`。
+- 截图：`docs/screenshots/console-height-preview.png`（6200 行）。
+- 打包：`dist/io.github.nixing178.jenkins-0.7.1-windows-x64.dbxp`，4,961,304 B，
+  sha256 `fc51b5a75f930e41…`，包内 ui 与本地逐字节一致，
+  sidecar `[verify-sidecar] ok: io.github.nixing178.jenkins/0.7.1`。
+
+---
+
+## 0.7.2 · 首屏默认滚到底（2026-10-23）
+
+### 根因
+
+1. 首屏 5000 行带 `content-visibility: auto`，`scrollHeight` 先按 `contain-intrinsic-size`
+   估算，一次 `scrollTop = scrollHeight` 后真实行高撑开，落点就不在底部了；
+2. 程序化滚动也会触发 `scroll` 事件，布局抖动瞬间 `distance > 48` 会被 `handleScroll`
+   误判成「用户上翻」，把 `follow` 关掉，后续追加不再跟随。
+
+### 修复
+
+- `scrollToBottom()` 改为三帧 settle：每帧重设 `scrollTop`，直到距离收敛；
+- 新增 `scrollGuard` 代际，程序滚动期间 `handleScroll` 直接返回；
+- `reset()` 恢复 `follow = true`（上一次手动上翻不影响新打开的构建）。
+
+### 验证
+
+```
+首屏：      distance=0, scrollTop=109309, follow=true,  latestVisible=false
+上翻 4 档：  distance=1600, follow=false, latestVisible=true
+点「最新」： distance=0, follow=true,  latestVisible=false
+vitest      # 290 PASS（19 files）
+vue-tsc     # 0 错
+pnpm build  # [check-version] ok: 0.7.2，ui/index.html 245.50 kB
+```
+
+截图：`docs/screenshots/console-first-open-bottom.png`。
+
+### 打包（0.7.2）
+
+- `dist/io.github.nixing178.jenkins-0.7.2-windows-x64.dbxp`，4,961,399 B，unsigned review candidate。
+- sha256 `b23d72ffe8834b40…`；包内 6 条目，`ui/index.html` 247,856 B 与本地逐字节一致。
+- sidecar `[verify-sidecar] ok: io.github.nixing178.jenkins/0.7.2`。
+
+---
+
+## 0.7.3 · 日志区底部被裁（2026-10-23）
+
+### 根因
+
+`BuildView` 是 `display:flex; flex-direction:column`，`.console` 作为 flex item 默认
+`flex-shrink: 1`。页面内容超过视口时，面板被压到 318px，而 `.log-body` 的
+`min-height: 260px` 顶住不让缩 → 工具栏 + 日志 + footer 总高 359px 溢出，
+`.console { overflow:hidden }` 把底部裁掉，**footer 完全不可见**。
+
+复现（860px 高视口，`?layout=build&big=1`）：
+
+```
+修复前：console.clientHeight=318, scrollHeight=359
+        log-body.bottom=820 > console.bottom=806
+        footer: top=820 bottom=846 visible=false
+修复后：console.clientHeight=611, scrollHeight=611
+        footer: top=1072 bottom=1098 visible=true
+        distance=0, lastFullyVisible=true
+```
+
+窄窗复测（760×620）：`console 553 = scrollHeight 553`，footer `visible=true`。
+
+### 修复
+
+`ConsoleView.vue` 的 `.console` 加 `flex: 0 0 auto`（不参与收缩，超出交给
+`.build-view` 滚动）。全屏时元素是 `position: fixed`，不受影响。
+
+### 验证
+
+```
+vitest      # 290 PASS（19 files）
+vue-tsc     # 0 错
+pnpm build  # [check-version] ok: 0.7.3，ui/index.html 245.51 kB
+```
+
+截图：`docs/screenshots/console-clip-after.png`（修复前状态代码已变更无法复现，此处只保留修复后）。
+
+### 打包（0.7.3）
+
+- `dist/io.github.nixing178.jenkins-0.7.3-windows-x64.dbxp`，4,961,406 B，unsigned review candidate。
+- sha256 `b6c69ea085edac65…`；包内 6 条目，`ui/index.html` 247,870 B 与本地逐字节一致。
+- sidecar `[verify-sidecar] ok: io.github.nixing178.jenkins/0.7.3`。
+
+---
+
+## 0.7.4 · 滚到底看不到最后几行（2026-10-23）
+
+### 现象
+
+真机 1006 行日志，滚动条已到底、`自动跟随` 勾选着，但最后 8 行（999–1006）
+没显示，末行 998 还被裁掉一半。
+
+### 根因
+
+`.log-row` 上的 `content-visibility: auto` + `contain-intrinsic-size: auto 22px`：
+未进入视口的行按 22px 估算，而折行行实际 44/66px。滚动高度因此被低估，
+滚动条停在「估算底部」，真实末尾还在下面。
+
+实测（`?long=1`，5000 行、混入 1400 条折行长行）：
+
+```
+修复前：scrollHeight=111,098 / scrollTop=110,548（已到底）
+修复后：scrollHeight=159,143 / scrollTop=158,593
+低估：  48,045px ≈ 2184 行 × 22px（30%）
+首屏：  526ms → 425ms（去掉估算反而更快）
+```
+
+### 修复
+
+移除 `.log-row` 的 `content-visibility` / `contain-intrinsic-size`，
+`scrollHeight` 恢复真实值，滚动条拖到底就是真底。
+
+### 验证
+
+```
+滚到底：  lastLine=7420, visibleLast=7420, hiddenBelow=0
+手动拖条：先回顶再设 scrollTop=max，等 1s → 末行完整可见（bottom 664 < body 672）
+vitest     # 290 PASS（19 files）
+vue-tsc    # 0 错
+pnpm build # [check-version] ok: 0.7.4，ui/index.html 245.46 kB
+```
+
+截图：`docs/screenshots/console-bottom-after.png`（修复前状态代码已变更无法复现，此处只保留修复后）。
+预览新增 `?long=1`（长行密集）用于回归这个场景。
+
+### 打包（0.7.4）
+
+- `dist/io.github.nixing178.jenkins-0.7.4-windows-x64.dbxp`，4,961,385 B，unsigned review candidate。
+- sha256 `6e91ff5c4749105f…`；包内 6 条目，`ui/index.html` 247,813 B 与本地逐字节一致。
+- sidecar `[verify-sidecar] ok: io.github.nixing178.jenkins/0.7.4`。
+
+## 0.7.5 · 停止构建 / 取消排队的二次确认（2026-10-23）
+
+### 现象
+
+点击「停止」既不弹确认也不执行。`stopBuild()` 里的原生 `window.confirm()` 在宿主
+webview 子 frame 中被静默忽略并返回 `false`，`if (!confirm) return` 直接吞掉操作。
+`cancelQueueItem()` 同样写法，同一隐患。
+
+### 方案
+
+新增应用内确认弹窗 `ConfirmAction.vue`，`src/lib/confirmRequest.ts` 负责构造与校验
+待确认目标；`stopBuild` / `cancelQueueItem` 只写 `pendingConfirm`，实际调用移入
+`confirmPending`。详见 `docs/plan-stop-confirm.md`。
+
+### 红 → 绿
+
+```
+新建 src/lib/confirmRequest.test.ts
+vitest run src/lib/confirmRequest.test.ts
+  红：Failed to load url ./confirmRequest — Test Files 1 failed, 0 test
+  绿：✓ 9 tests passed
+```
+
+### 回归
+
+```
+go test ./...   # internal/jenkins ok 1.455s；internal/rpc ok 1.045s
+vitest run      # 20 files / 299 PASS
+vue-tsc         # 0 错
+pnpm build      # [check-version] ok: 0.7.5，ui/index.html 249.45 kB
+```
+
+### 打包（0.7.5）
+
+- `dist/io.github.nixing178.jenkins-0.7.5-windows-x64.dbxp`，4,962,300 B，unsigned review candidate。
+- sha256 `6866817a3ec25b0b…`；包内 6 条目，`ui/index.html` 251,894 B 与本地逐字节一致。
+- sidecar `[verify-sidecar] ok: io.github.nixing178.jenkins/0.7.5`（从 .dbxp 取出 `bin/windows-x64/dbx-plugin-jenkins.exe`，8,579,072 B）。
+

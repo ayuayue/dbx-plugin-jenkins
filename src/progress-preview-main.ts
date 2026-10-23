@@ -35,12 +35,12 @@ function build(
 }
 
 const builds: BuildSummary[] = [
-  build(632, "building", 38_000, 60_000, "Started by user 廖思源"),
-  build(631, "success", 47_000, 52_000, "Started by user 廖思源"),
-  build(630, "building", 9_000, 0, "Started by user 廖思源"),
-  build(629, "success", 103_000, 100_000, "Started by user 廖思源"),
-  build(628, "failure", 4_000, 45_000, "Started by user 陶凯"),
-  build(627, "success", 51_000, 55_000, "Started by user 廖思源"),
+  build(632, "building", 38_000, 60_000, "Started by user 开发者 C"),
+  build(631, "success", 47_000, 52_000, "Started by user 开发者 C"),
+  build(630, "building", 9_000, 0, "Started by user 开发者 C"),
+  build(629, "success", 103_000, 100_000, "Started by user 开发者 C"),
+  build(628, "failure", 4_000, 45_000, "Started by user 开发者 A"),
+  build(627, "success", 51_000, 55_000, "Started by user 开发者 C"),
 ];
 
 const last = builds[0];
@@ -58,10 +58,10 @@ const stageSnapshot = {
 };
 
 const job: JobDetail = {
-  name: "anjun-materials-web-admin",
-  fullName: "Builds/anjun-materials-web-admin",
+  name: "demo-materials-web",
+  fullName: "Builds/demo-materials-web",
   description: "构建列表进度列预览",
-  url: "https://jenkins.example/job/Builds/job/anjun-materials-web-admin/",
+  url: "https://jenkins.example/job/Builds/job/demo-materials-web/",
   color: "blue_anime",
   class: "WorkflowJob",
   buildable: true,
