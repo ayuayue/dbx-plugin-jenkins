@@ -1282,3 +1282,16 @@ pnpm build      # [check-version] ok: 0.7.5，ui/index.html 249.45 kB
 - sha256 `6866817a3ec25b0b…`；包内 6 条目，`ui/index.html` 251,894 B 与本地逐字节一致。
 - sidecar `[verify-sidecar] ok: io.github.nixing178.jenkins/0.7.5`（从 .dbxp 取出 `bin/windows-x64/dbx-plugin-jenkins.exe`，8,579,072 B）。
 
+### Release 发布（v0.7.5）
+
+- tag `v0.7.5`（annotated，指向 `42d40a1`）推送后创建 Release，`release: published` 触发
+  `plugin-release.yml`（run 39895532687，success）。
+- CI 从 tag 源码重建（`ui/`、`dist/` 不进 Git），产出 Windows x64 候选包：
+  - `io.github.nixing178.jenkins-0.7.5-windows-x64.dbxp`，4,962,258 B
+  - sha256 `414a4d2a06e9e37a6f5362c3ac5c8f1d59d7bbc40f00a862ad853ff2d94be551`
+- 与本地构建包（4,962,300 B / `6866817a…`）不同属预期：CI 重跑构建，时间戳与压缩顺序有差异，
+  上架与用户校验一律以 Release 资产为准。
+- 校验记录：下载包 sha256 与 `release-candidates.json` 一致；包内 6 条目、`manifest.json` 为 0.7.5；
+  取出 sidecar 8,578,560 B → `[verify-sidecar] ok: io.github.nixing178.jenkins/0.7.5`。
+- `docs/安装说明书-0.7.5.txt` 中的大小与 SHA-256 已同步为 Release 资产实测值。
+

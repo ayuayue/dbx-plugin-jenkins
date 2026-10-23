@@ -46,8 +46,9 @@
 --------------------------------------------------------------------------------
 
   文件名 : io.github.nixing178.jenkins-0.7.5-windows-x64.dbxp
-  大小   : 4,962,300 字节（约 4.73 MB）
-  SHA-256: 6866817a3ec25b0b1396975fc970b0c8c146603d2dc4f9349bf787ab573773b3
+  来源   : GitHub Releases v0.7.5 资产（CI 从 tag 源码重建）
+  大小   : 4,962,258 字节（约 4.73 MB）
+  SHA-256: 414a4d2a06e9e37a6f5362c3ac5c8f1d59d7bbc40f00a862ad853ff2d94be551
   签名   : 未签名（unsigned review candidate，仅供本地 / 内网安装）
 
   包内文件：
