@@ -1412,11 +1412,14 @@ pnpm build      # [check-version] ok: 0.7.5，ui/index.html 249.45 kB
 
 ### 打包（0.10.0）
 
-- `dist/io.github.nixing178.jenkins-0.10.0-windows-x64.dbxp`，4,988,865 B，unsigned review candidate。
-- sha256 `c1eb23dee418aad708e2fe50917c34b89c2cf760dd359fd16536492c465db1c3`；
+- 本地：`dist/io.github.nixing178.jenkins-0.10.0-windows-x64.dbxp`，4,988,865 B，
+  sha256 `c1eb23dee418aad708e2fe50917c34b89c2cf760dd359fd16536492c465db1c3`；
   包内 6 条目，`ui/index.html` 281,691 B 与本地逐字节一致，包内 manifest 为 0.10.0。
 - sidecar（从 .dbxp 取出，8,609,792 B）：含 `0.10.0` ×2（Metadata + UA）、`0.9.2` / `0.9.1` ×0。
 - 重建可复现：变异还原后重新 `pnpm build` + `package .`，sha256 与首次完全一致。
+- **Release 资产（CI 从 tag 重建，商店 candidate 以此为准）**：4,988,821 B，
+  sha256 `e8ffb0f5ddb5c0436eb065467ee1a2bf3f03bb10df868ae3b39da05b19aaf60f`。
+  本地包与 CI 包哈希不同属正常，安装说明书与商店元数据必须取 CI 值。
 
 ### 实现要点（易错）
 
