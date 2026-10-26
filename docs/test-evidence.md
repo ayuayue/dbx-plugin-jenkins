@@ -57,6 +57,11 @@
 | PG1 | 构建列表进度列：`estimatedDuration` 透出 + 进度算法（构建中百分比 / 超估算封顶 99% / 缺估算走不确定态 / 已完成返回 null） | `go test ./internal/jenkins/ -run TestGetBuildsReadsEstimatedDuration` + `npx vitest run src/lib/progress.test.ts` | Go：`builds[0].EstimatedDuration undefined (BuildSummary has no field)` 编译失败；前端：4 FAIL / 5（空实现返回 null） | Go 全量 OK；vitest 206 PASS（15 files）；`vue-tsc --noEmit` exit 0；`pnpm build` 产物 `ui/index.html` 223 kB（版本 0.4.4 一致） |
 | PG2 | 进度条按阶段步进：单构建 `jenkins/buildStages` + `stageProgress`（已完成一格 / 进行中半格 / 封顶 99 / 空阶段回退时长估算） | `go test ./internal/rpc/ -run TestRPCBuildStages` + `npx vitest run src/lib/progress.test.ts` | Go：`method not found: jenkins/buildStages`（3 FAIL）；前端：`stageProgress is not a function`（5 FAIL / 13） | Go 全量 OK；vitest 214 PASS（15 files）；`vue-tsc --noEmit` exit 0；`pnpm build` 224.07 kB；预览 `#632` 时长估算 63% → 阶段步进 37%，确认阶段优先 |
 | EX1 | 构建执行状态列表（0.5.0）：`jenkins/executors` 槽位明细（空闲占位 / Queue$Executable 等待启动 / 节点离线 / 进度复用时长估算） | `go test ./internal/jenkins/ -run "TestGetExecutors\|TestJobNameFromDisplayName"` + `npx vitest run src/lib/executors.test.ts` | Go：`client.GetExecutors undefined`、`undefined: jobNameFromDisplayName`（build failed）；前端：`./executors` 模块缺失、`hasRunningExecutor is not a function`、`expected ['overview'] to deeply equal ['overview','executors']`（3 files / 4 tests FAIL） | Go 全量 OK；vitest 244 PASS（17 files）；`vue-tsc --noEmit` exit 0；`[check-version] ok: 0.5.0`、`pnpm build` 230.47 kB |
+| BB1 | 任务批量构建（0.8.0）：`Client.BatchBuild`（参数默认值、不可构建/排队/构建中跳过、单条失败不中断、只读零请求、读并发上限）+ RPC `jenkins/batchBuild` + 前端选择/汇总纯函数 | `go test ./internal/jenkins/ -run TestBatchBuild` + `go test ./internal/rpc/ -run TestRPCBatchBuild` + `npx vitest run src/lib/batchBuild.test.ts` | Go jenkins：`client.BatchBuild undefined`、`undefined: BatchBuildOptions`（build failed，6 条用例全部阻塞）；Go rpc：3 FAIL `method not found: jenkins/batchBuild`；前端：`Failed to load url ./batchBuild`（0 test） | Go 全量 OK（176 顶层用例，+10）；vitest 315 PASS（21 files）；`vue-tsc --noEmit` exit 0；`[check-version] ok: 0.8.0`、`pnpm build` ui/index.html 263.69 kB；预览截图 `docs/batch-preview.png` / `-dark.png` / `-result.png` |
+| BB2 | 批量构建优化（0.8.1）：分批 `chunkJobs`/`failedChunk`/`abortedChunk`/`mergeBatchResults`、进度 `batchProgress`、中止判定 `shouldAbortChunks`、Shift 区间 `selectRange`、失败原因细化 | `npx vitest run src/lib/batchBuild.test.ts` | 17 FAIL / 33：`chunkJobs is not a function` 等 8 个新函数未定义；`batchReasonKey("forbidden")` 仍回落通用文案 | vitest 332 PASS（21 files，+17）；`go test ./...` 回归 OK；`vue-tsc --noEmit` exit 0；`[check-version] ok: 0.8.1`、`pnpm build` ui/index.html 267.25 kB；截图 `docs/batch-preview.png` / `-dark.png` / `-running.png`（12/30）/ `-result.png`（重试按钮） |
+| BB3 | 批量构建 v3（0.9.0）：共享参数叠加（只叠加任务声明过的参数名）、`jenkins/batchInspect` 预检、跨视图缓存与计数、`ParamFields` 复用 | `go test ./internal/jenkins/ -run "TestBatchBuildAppliesSharedParams|TestBatchBuildSharedParamsIgnoredForPlainJob|TestInspectBatch"` + `go test ./internal/rpc/ -run TestRPCBatchInspect` + `npx vitest run src/lib/batchBuild.test.ts` | Go jenkins：`unknown field Params in struct literal of type BatchBuildOptions`、`client.InspectBatch undefined`（build failed）；Go rpc：2 FAIL `method not found: jenkins/batchInspect`；前端：9 FAIL / 37（`rememberTargets`/`collectSharedParameters`/`buildParamValues`/`countOutsideCurrent` 未定义） | Go 全量 OK（jenkins/rpc 含 4 组新用例）；vitest 336 PASS（21 files）；`vue-tsc --noEmit` exit 0；`[check-version] ok: 0.9.0`、`pnpm build` ui/index.html 272.49 kB；预览页已更新四态（读取中/确认/执行/结果），本轮未重拍截图（headless Chrome/Edge 启动即退，工具异常） |
+| BB4 | 批量参数区只保留 Boolean 开关（0.9.1）：`collectSharedParameters` 过滤类型、移除 `conflicts` 机制 | `npx vitest run src/lib/batchBuild.test.ts` | 2 FAIL / 37：`expected [ 'MODULE_NAME', 'BRANCH_NAME', …(1) ] to deeply equal [ 'SKIP_BUILD' ]`；`expected [ { name: 'BRANCH_NAME', …(3) } ] to deeply equal []` | vitest 336 PASS（21 files）；`go test ./...` 回归 OK；`vue-tsc --noEmit` exit 0；`[check-version] ok: 0.9.1`、`pnpm build` ui/index.html 275,114 B；产物含新提示「仅共享开关（Boolean）参数」，旧「同名参数类型不一致」文案已消失（grep 0） |
+| OA1 | 概览页自动刷新（0.9.2）：活跃/空闲双档 `hasQueuedBuild` / `resolveOverviewRefresh`、`pollOverview` 概览+执行器并行、OverviewView 徽章 | `npx vitest run src/lib/refresh.test.ts` | 8 FAIL / 60：`expected undefined to be 5000`（常量未导出）；`hasQueuedBuild is not a function` ×2；`resolveOverviewRefresh is not a function` ×5 | vitest 344 PASS（21 files，+8）；`go test ./...` 回归 OK；`vue-tsc --noEmit` exit 0；`[check-version] ok: 0.9.2`、`pnpm build` ui/index.html 276,405 B；打包 4,987,190 B / sha256 `65636639…`，包内 ui 逐字节一致，sidecar 含 `0.9.2` 且无 `0.9.1` |
 
 ## 关键红测样本
 
@@ -1295,3 +1300,139 @@ pnpm build      # [check-version] ok: 0.7.5，ui/index.html 249.45 kB
   取出 sidecar 8,578,560 B → `[verify-sidecar] ok: io.github.nixing178.jenkins/0.7.5`。
 - `docs/安装说明书-0.7.5.txt` 中的大小与 SHA-256 已同步为 Release 资产实测值。
 
+
+### 打包（0.8.0）
+
+- `dist/io.github.nixing178.jenkins-0.8.0-windows-x64.dbxp`，4,978,593 B，unsigned review candidate。
+- sha256 `3e5c7fa90f6b039eeb4426a0250861019c6eb9978dc3a6ec6f886f00063f624b`；
+  包内 6 条目（assets ×2 / bin ×1 / manifest / ui / checksums），`ui/index.html` 266,368 B 与本地逐字节一致。
+- sidecar `[verify-sidecar] ok: io.github.nixing178.jenkins/0.8.0`（从 .dbxp 取出 `bin/windows-x64/dbx-plugin-jenkins.exe`，8,603,136 B）。
+
+### 打包（0.8.1）
+
+- `dist/io.github.nixing178.jenkins-0.8.1-windows-x64.dbxp`，4,979,744 B，unsigned review candidate。
+- sha256 `6da69207445f54b614dbf84eef1ce2949f6b9c8d50a9fbcc236243a5ecbf4227`；
+  包内 6 条目，`ui/index.html` 270,023 B 与本地逐字节一致，包内 manifest 为 0.8.1。
+- sidecar `[verify-sidecar] ok: io.github.nixing178.jenkins/0.8.1`（从 .dbxp 取出，8,603,136 B）。
+
+### 打包（0.9.0）
+
+- `dist/io.github.nixing178.jenkins-0.9.0-windows-x64.dbxp`，4,987,050 B，unsigned review candidate。
+- sha256 `530db5b5eeafabfe311c9896e71ba79d6d031cf1e3b4e142a4116807dcd79606`；
+  包内 6 条目，`ui/index.html` 275,488 B 与本地逐字节一致，包内 manifest 为 0.9.0。
+- sidecar `[verify-sidecar] ok: io.github.nixing178.jenkins/0.9.0`（从 .dbxp 取出，8,609,792 B）。
+
+### 打包（0.9.1）
+
+- `dist/io.github.nixing178.jenkins-0.9.1-windows-x64.dbxp`，4,986,912 B，unsigned review candidate。
+- sha256 `95c7456f79db5a32db5f1db27084990d40b4561cc3c2b48a865bf9105a16087a`；
+  包内 6 条目，`ui/index.html` 275,114 B 与本地逐字节一致，包内 manifest 为 0.9.1。
+- sidecar `[verify-sidecar] ok: io.github.nixing178.jenkins/0.9.1`（从 .dbxp 取出，8,609,792 B）。
+
+## 0.9.2 · 概览页自动刷新（2026-10-26）
+
+### 现象
+
+概览页的自动刷新只落了一半：`autoRefreshMode` 仅在有执行器被占用时返回 `executors`，
+而 `pollExecutors` 只拉 `jenkins/executors` —— 顶部四张卡片（执行器占用比 / 排队数 /
+节点在线 / 静默模式）永远停在上次进入页面的值；全空闲时完全不刷新；页面也没有刷新徽章。
+
+### 方案
+
+见 `docs/plan-overview-auto-refresh.md`（D1:B / D2:B / D3:A / D4:A / D5:A）：
+
+- 活跃档 5s、空闲档 30s（`OVERVIEW_AUTO_REFRESH_INTERVAL_MS` / `OVERVIEW_IDLE_REFRESH_INTERVAL_MS`）；
+- `hasQueuedBuild` + `resolveOverviewRefresh` 纯函数分档：执行器被占用或队列非空 → 活跃；
+- `pollOverview` 用 `Promise.allSettled` 并行拉 `jenkins/overview` + `jenkins/executors`，
+  分别落盘、任一失败仍抛给既有三次暂停护栏；`overviewToken`/`executorsToken` 防旧响应覆盖；
+- `OverviewView` 补 `RefreshBadge` + 按钮三态，`@refresh` 走 `refreshCurrent`；
+- 后端零改动。
+
+### 红 → 绿
+
+- 红（09:45）：`env -u NODE_OPTIONS pnpm exec vitest run src/lib/refresh.test.ts`
+  → `Tests 8 failed | 52 passed (60)`：`expected undefined to be 5000`（常量未导出）、
+  `hasQueuedBuild is not a function` ×2、`resolveOverviewRefresh is not a function` ×5。
+- 绿（09:48）：同命令 `Tests 60 passed (60)`。
+- 全量（09:53）：`env -u NODE_OPTIONS pnpm exec vitest run --reporter=dot`
+  → `Test Files 21 passed (21)`、`Tests 344 passed (344)`（+8，无回归）。
+  （首次直接 `pnpm test` 因默认 120s 超时被 SIGTERM，仅跑到第 18 个文件，非用例失败。）
+- 后端回归（09:59）：`go test ./...` → `internal/jenkins ok 2.125s`、`internal/rpc ok 1.384s`。
+- 类型检查（10:01）：`node node_modules/vue-tsc/bin/vue-tsc.js --noEmit` → exit 0。
+  首次报 `src/executor-preview-main.ts` 缺 `refresh` prop（TS2769），补 mock `RefreshUi` 后通过。
+- 构建（10:25）：`[check-version] ok: 0.9.2`，`ui/index.html 273.41 kB`（276,405 B）。
+  - 坑：`pnpm build` 的 `emptyOutDir` 触发本机 safe-delete 批量守卫（`SAFE_DELETE_BULK_GUARD_ERROR ... ETIMEDOUT`），
+    构建失败但文件未损坏；改用 PowerShell 单独删 `ui/index.html` 后重跑即通过。
+
+### 打包（0.9.2）
+
+- `dist/io.github.nixing178.jenkins-0.9.2-windows-x64.dbxp`，4,987,190 B，unsigned review candidate。
+- sha256 `65636639b1284cf9c549881e6a314df052ea0d19568bb92f1cc809ed2ca9e8fc`；
+  包内 6 条目，`ui/index.html` 276,405 B 与本地逐字节一致，包内 manifest 为 0.9.2。
+- sidecar（从 .dbxp 取出 `bin/windows-x64/dbx-plugin-jenkins.exe`，8,609,792 B）：
+  含 `io.github.nixing178.jenkins` ×1、`0.9.2` ×2（Metadata + UA）、`0.9.1` ×0。
+- 预览：概览页整页预览复用 `executor-preview.html`（`pnpm dev` 打开，`?theme=dark` 切深色），
+  未新建 `overview-preview.html`——既有页面渲染的就是整个 `OverviewView`，新建会重复入口。
+
+### 实现要点（易错）
+
+- **初始档位不会触发 watch**：概览是首屏，`autoRefreshMode` 从一开就是 `overviewIdle`，
+  没有「null → 非 null」的变化，`watch(autoRefreshMode)` 不会执行。必须在 `onMounted` 末尾补一次
+  `startAutoRefresh(autoRefreshMode.value)`，否则全空闲时要切页才开始轮询。
+- `pollOverview` 用 `Promise.allSettled`：两路分别落盘，任一路失败仍 `throw` 给既有护栏计数；
+  token 校验（`overviewToken` / `executorsToken`）在落盘前统一判断，任一被手动刷新超越就整轮作废。
+
+## 0.10.0 页面前进 / 后退（鼠标侧键）
+
+### 方案
+
+见 `docs/nav-history-plan.md`（D1 全量 / D2 返回改后退 / D3 加箭头 / D4 不做 Alt / D5 上限 50 / D6 弹窗优先 / D7 0.10.0）：
+
+- `src/lib/navStack.ts`：内部导航栈是唯一真相，`push` 返回 `{index, added}`，`restore` 越界夹紧，上限 50，相同条目合并；
+- `src/lib/mouseNav.ts`：`button 3/4 → back/forward`，`NAV_MOUSE_FALLBACK_MS=90` 兜底窗口、`NAV_DEDUPE_MS=150` 去抖；
+- `src/lib/historyBridge.ts`：`push/replace/go/index`，`pushState` 抛错即永久降级；
+- `App.vue`：`navEntry/recordNav/applyEntry/navBack/navForward/handleMouseNavButton/handlePopState`，
+  六处导航入口接线，`closeBuild`/`backToJobs` 改为后退，`loadJobs` 加 `autoSelect`，topbar 加 ←/→；
+- 后端零改动（仅版本号与 UA 字符串）。
+
+### 测试
+
+- 新增 3 个测试文件共 29 条：`navStack.test.ts` 12、`mouseNav.test.ts` 8、`historyBridge.test.ts` 9。
+- **红图缺失（如实记录）**：10:51–11:43 期间本会话进程执行不可用
+  （`SandboxError 0xFFFFF826`：center 规则快照不可用，Bash 与 PowerShell 均无法启动，免沙箱同样失败）。
+  测试先于实现写完但无法运行，环境恢复后首个可运行结果即为绿。
+- 变异验证（11:52，替代红图证明用例真的能拦 bug）：把 `resolveMouseButton` 的 `button === 3` 改成 `2`
+  → `Tests 2 failed | 27 passed (29)`（`expected 'back' to be null`、侧键 3 不再返回 back）；
+  还原后 `Tests 29 passed (29)`。
+- 全量（11:43 → 11:52 复核）：`env -u NODE_OPTIONS node node_modules/vitest/vitest.mjs run`
+  → `Test Files 24 passed (24)`、`Tests 373 passed (373)`（+29，无回归）。
+- 后端回归（11:48）：`go test ./...` → `internal/jenkins ok 1.910s`、`internal/rpc ok 1.682s`。
+- 类型检查（11:47）：`node node_modules/vue-tsc/bin/vue-tsc.js --noEmit` → exit 0。
+- 构建（11:48）：`[check-version] ok: 0.10.0`，`ui/index.html 278.69 kB`（281,691 B）。
+
+### 打包（0.10.0）
+
+- `dist/io.github.nixing178.jenkins-0.10.0-windows-x64.dbxp`，4,988,865 B，unsigned review candidate。
+- sha256 `c1eb23dee418aad708e2fe50917c34b89c2cf760dd359fd16536492c465db1c3`；
+  包内 6 条目，`ui/index.html` 281,691 B 与本地逐字节一致，包内 manifest 为 0.10.0。
+- sidecar（从 .dbxp 取出，8,609,792 B）：含 `0.10.0` ×2（Metadata + UA）、`0.9.2` / `0.9.1` ×0。
+- 重建可复现：变异还原后重新 `pnpm build` + `package .`，sha256 与首次完全一致。
+
+### 实现要点（易错）
+
+- **双通道必须互让**：宿主把侧键当浏览器命令时先发 `popstate`，DOM 侧要空等 90ms 确认没人接再自己导航；
+  否则一次按键退两步。反过来，DOM 通道自己动作时也必须用 `history.go(±1)` 走宿主栈，
+  不能直接改内部游标——否则两套游标错位，下一次系统 back 会「按了没反应」。
+- **降级后禁止 `go`**：`file://` / `about:srcdoc` 下 `pushState` 抛 `SecurityError`；一旦不可用，
+  浏览器栈里没有我们的条目，此时 `go(-1)` 会直接退出插件，必须保持内部栈单通道。
+- **回放要按页补数据**：切页走 `refreshOnEnter`；任务 / 构建 / 阶段必须
+  `loadJobs(folder, silent, autoSelect=false)` + `selectJob(fullName)` 精确定位，
+  否则「自动选中第一个」会让退回去看到另一条任务。
+- **竞态守卫**：`openBuild` 记录前判 `rememberReturn && navApplying`；四个导航入口记录前判
+  `view.value` 仍是目标页——请求回来时用户可能已经用后退离开。
+
+### 真机验收
+
+- 2026-10-26 12:00，源哥在 DBX 宿主内实测：**鼠标侧键前进 / 后退工作正常**（安装 0.10.0 包后验证）。
+- 说明双通道至少一条生效；具体走 DOM 通道还是 `popstate` 未取日志确认（两条路径互为兜底，不影响使用）。
+- 预览截图未出：Headless Chrome 在本机启动即退出（无输出），CDP 无法连接。

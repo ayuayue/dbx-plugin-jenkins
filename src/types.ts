@@ -202,6 +202,28 @@ export interface TriggerResult {
   queueId: number;
 }
 
+/** 批量构建里单个任务的结果，切片顺序与请求的任务顺序一致。 */
+export interface BatchBuildResult {
+  job: string;
+  success: boolean;
+  skipped: boolean;
+  queueId: number;
+  /** 跳过/失败原因：not_buildable | in_queue | building | 错误 Kind（forbidden / read_only …）。 */
+  reason: string;
+  error: string;
+}
+
+/** 批量预检结果：确认弹窗用它展示实时状态与参数定义。 */
+export interface BatchTargetInfo {
+  name: string;
+  fullName: string;
+  status: JenkinsStatus;
+  building: boolean;
+  buildable: boolean;
+  inQueue: boolean;
+  parameters: ParameterDefinition[] | null;
+}
+
 export interface WhoAmIResponse {
   success: boolean;
   readOnly: boolean;

@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, reactive } from "vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import { t } from "../i18n";
+import { buildParamValues } from "../lib/batchBuild";
 import type { JobDetail } from "../types";
+import ParamFields from "./ParamFields.vue";
 
 const props = defineProps<{ job: JobDetail }>();
 
@@ -10,17 +12,12 @@ const emit = defineEmits<{
   cancel: [];
 }>();
 
-const values = reactive<Record<string, any>>({});
-
-for (const parameter of props.job.parameters ?? []) {
-  const isBoolean = parameter.type === "BooleanParameterDefinition";
-  values[parameter.name] = isBoolean
-    ? parameter.defaultValue === "true"
-    : parameter.defaultValue ?? "";
-}
+const values = ref<Record<string, unknown>>(
+  buildParamValues(props.job.parameters ?? []),
+);
 
 function submit(): void {
-  emit("submit", { ...values });
+  emit("submit", { ...values.value });
 }
 
 function onKeydown(event: KeyboardEvent): void {
@@ -43,47 +40,17 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
       </header>
 
       <div class="body">
-        <label v-for="parameter in job.parameters ?? []" :key="parameter.name" class="field">
-          <span class="label">
-            <code>{{ parameter.name }}</code>
-            <span class="type">{{ parameter.type.replace("ParameterDefinition", "") }}</span>
-          </span>
-          <span v-if="parameter.description" class="hint">{{ parameter.description }}</span>
-
-          <select
-            v-if="parameter.type === 'ChoiceParameterDefinition'"
-            v-model="values[parameter.name]"
-          >
-            <option v-for="choice in parameter.choices ?? []" :key="choice" :value="choice">
-              {{ choice }}
-            </option>
-          </select>
-
-          <textarea
-            v-else-if="parameter.type === 'TextParameterDefinition'"
-            v-model="values[parameter.name]"
-            rows="3"
-          />
-
-          <input
-            v-else-if="parameter.type === 'BooleanParameterDefinition'"
-            v-model="values[parameter.name]"
-            type="checkbox"
-            class="checkbox"
-          />
-
-          <input
-            v-else-if="parameter.type === 'PasswordParameterDefinition'"
-            v-model="values[parameter.name]"
-            type="password"
-          />
-
-          <input v-else v-model="values[parameter.name]" type="text" />
-        </label>
+        <ParamFields
+          :parameters="job.parameters ?? []"
+          :model-value="values"
+          @update:model-value="values = $event"
+        />
       </div>
 
       <footer>
-        <button type="button" class="ghost" @click="emit('cancel')">{{ t("cancel") }}</button>
+        <button type="button" class="ghost" @click="emit('cancel')">
+          {{ t("cancel") }}
+        </button>
         <button type="button" class="primary" @click="submit">{{ t("start") }}</button>
       </footer>
     </section>
@@ -149,63 +116,6 @@ h2 {
 .body {
   padding: 16px 18px;
   overflow: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.label {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.label code {
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.type {
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.hint {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-input:not(.checkbox),
-select,
-textarea {
-  width: 100%;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  background: var(--panel-soft);
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  outline: none;
-}
-
-input:focus,
-select:focus,
-textarea:focus {
-  border-color: var(--accent);
-}
-
-.checkbox {
-  width: 16px;
-  height: 16px;
 }
 
 footer {

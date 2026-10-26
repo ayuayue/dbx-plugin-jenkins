@@ -1,4 +1,6 @@
 import type {
+  BatchBuildResult,
+  BatchTargetInfo,
   BuildDetail,
   BuildSummary,
   ConsoleChunk,
@@ -116,12 +118,37 @@ export const jenkinsApi = {
     return invoke<TriggerResult>("jenkins/trigger", { job, params }, 60_000);
   },
 
+  /**
+   * 批量预检：一次拿到所选任务的实时状态与参数定义。
+   * 只读；单个任务读取失败会在该条带 error 返回，不影响其余任务。
+   */
+  batchInspect(jobs: string[]): Promise<{ targets: BatchTargetInfo[] }> {
+    return invoke<{ targets: BatchTargetInfo[] }>("jenkins/batchInspect", { jobs }, 60_000);
+  },
+
+  /**
+   * 批量触发构建：一次 RPC 返回逐任务结果。
+   * 前端按 10 个一批调用，单批 60s 够用；超时只影响这一批，其余批次照常。
+   * `params` 为本批共用参数，后端只把它应用到任务自己声明过的参数名上。
+   */
+  batchBuild(
+    jobs: string[],
+    skipBusy = true,
+    params: Record<string, unknown> = {},
+  ): Promise<{ results: BatchBuildResult[] }> {
+    return invoke<{ results: BatchBuildResult[] }>(
+      "jenkins/batchBuild",
+      { jobs, skipBusy, params },
+      60_000,
+    );
+  },
+
   stop(job: string, number: number): Promise<{ success: boolean }> {
     return invoke<{ success: boolean }>("jenkins/stop", { job, number }, 30_000);
   },
 
-  overview(): Promise<Overview> {
-    return invoke<Overview>("jenkins/overview", {}, 30_000);
+  overview(timeoutMs = 30_000): Promise<Overview> {
+    return invoke<Overview>("jenkins/overview", {}, timeoutMs);
   },
 
   queue(timeoutMs = 30_000): Promise<{ items: QueueItem[] }> {

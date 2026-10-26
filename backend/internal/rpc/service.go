@@ -57,6 +57,10 @@ type LifecycleRequest struct {
 	ID     int            `json:"id"`
 	Params map[string]any `json:"params"`
 
+	// 批量构建：skipBusy 缺省为 true（*bool 才能区分「没传」与「显式 false」）。
+	SkipBusy       *bool `json:"skipBusy"`
+	MaxConcurrency int   `json:"maxConcurrency"`
+
 	// 任务 / 视图 CRUD
 	Name         string         `json:"name"`
 	NewName      string         `json:"newName"`
@@ -278,6 +282,40 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 			return nil, mapError(err)
 		}
 		return map[string]any{"success": true}, nil
+
+	case "jenkins/batchBuild":
+		if len(request.Jobs) == 0 {
+			return nil, invalidParams("missing job names")
+		}
+		skipBusy := true
+		if request.SkipBusy != nil {
+			skipBusy = *request.SkipBusy
+		}
+		results, err := client.BatchBuild(ctx, request.Jobs, jenkins.BatchBuildOptions{
+			SkipBusy:       skipBusy,
+			MaxConcurrency: request.MaxConcurrency,
+			Params:         toForm(request.Params),
+		})
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if results == nil {
+			results = []jenkins.BatchBuildResult{}
+		}
+		return map[string]any{"results": results}, nil
+
+	case "jenkins/batchInspect":
+		if len(request.Jobs) == 0 {
+			return nil, invalidParams("missing job names")
+		}
+		targets, err := client.InspectBatch(ctx, request.Jobs, request.MaxConcurrency)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if targets == nil {
+			targets = []jenkins.BatchTargetInfo{}
+		}
+		return map[string]any{"targets": targets}, nil
 
 	case "jenkins/overview":
 		overview, err := client.GetOverview(ctx)

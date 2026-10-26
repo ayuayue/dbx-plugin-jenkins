@@ -78,6 +78,17 @@ const executors: ExecutorInfo[] = [
   executor({ node: "agent-win-02", nodeOffline: true, index: 1 }),
 ];
 
+/** 概览页活跃档：有槽位被占用时的徽章与按钮三态。 */
+const refresh = {
+  mode: "overview",
+  paused: false,
+  inFlight: false,
+  lastAt: now,
+  intervalMs: 5000,
+  refreshing: false,
+  refreshed: false,
+};
+
 const Harness = {
   setup() {
     return () =>
@@ -90,6 +101,7 @@ const Harness = {
             loading: false,
             executors,
             loadingExecutors: false,
+            refresh,
             onRefresh: () => {},
             onOpenExecutor: () => {},
           }),

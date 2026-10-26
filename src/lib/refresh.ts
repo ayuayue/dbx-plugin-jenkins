@@ -1,4 +1,10 @@
-import type { BuildDetail, BuildSummary, ExecutorInfo, StageMatrix } from "../types";
+import type {
+  BuildDetail,
+  BuildSummary,
+  ExecutorInfo,
+  Overview,
+  StageMatrix,
+} from "../types";
 
 /** 构建列表轮询间隔：有构建中时每 3s 刷新一次。 */
 export const AUTO_REFRESH_INTERVAL_MS = 3000;
@@ -9,8 +15,15 @@ export const STAGE_AUTO_REFRESH_INTERVAL_MS = 5000;
 /** 队列轮询间隔：排队项进出比构建状态慢，5s 足够且不压 Jenkins。 */
 export const QUEUE_AUTO_REFRESH_INTERVAL_MS = 5000;
 
-/** 执行器轮询间隔：只在有执行器被占用时启停，全空闲零请求。 */
-export const EXECUTOR_AUTO_REFRESH_INTERVAL_MS = 5000;
+/** 概览页活跃档：有执行器被占用或队列有排队项时，5s 一轮。 */
+export const OVERVIEW_AUTO_REFRESH_INTERVAL_MS = 5000;
+
+/**
+ * 概览页空闲档：全空闲时降到 30s 兜底。
+ * 外部触发的构建、排队项进出、节点上下线都可能在无本地操作时发生，
+ * 完全停轮询会让概览页只在手动刷新时才有新数字。
+ */
+export const OVERVIEW_IDLE_REFRESH_INTERVAL_MS = 30_000;
 
 /** 触发构建后跟踪新构建出现的最长时间：排队过久就放弃跟踪，避免无休止轮询。 */
 export const PENDING_BUILD_TIMEOUT_MS = 120_000;
@@ -51,6 +64,27 @@ export function hasRunningExecutor(
 ): boolean {
   if (!rows?.length) return false;
   return rows.some((row) => row.idle === false);
+}
+
+/** 队列里是否有排队项：排队项比构建状态变得快，概览数字要跟着动。 */
+export function hasQueuedBuild(overview: Overview | null | undefined): boolean {
+  return (overview?.queueLength ?? 0) > 0;
+}
+
+/** 概览页刷新档位：活跃（5s）或空闲（30s 兜底）。 */
+export type OverviewRefreshTier = "active" | "idle";
+
+/**
+ * 概览页刷新档位：执行器被占用或队列非空 → active；否则 idle。
+ * 两个数据源任一显示「有活」就算活跃，避免只认执行器漏掉排队项。
+ */
+export function resolveOverviewRefresh(
+  overview: Overview | null | undefined,
+  executors: ExecutorInfo[] | null | undefined,
+): OverviewRefreshTier {
+  if (hasRunningExecutor(executors)) return "active";
+  if (hasQueuedBuild(overview)) return "active";
+  return "idle";
 }
 
 /** 构建详情页是否需要轮询：只要这一条构建还在跑。 */

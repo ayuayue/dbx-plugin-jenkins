@@ -38,6 +38,19 @@ type ParameterDefinition struct {
 	Choices      []string `json:"choices"`
 }
 
+// BatchTargetInfo 是批量预检结果：确认弹窗用的实时状态与参数定义。
+type BatchTargetInfo struct {
+	Name       string                `json:"name"`
+	FullName   string                `json:"fullName"`
+	Status     Status                `json:"status"`
+	Building   bool                  `json:"building"`
+	Buildable  bool                  `json:"buildable"`
+	InQueue    bool                  `json:"inQueue"`
+	Parameters []ParameterDefinition `json:"parameters"`
+	// Error 只在单个任务读取失败时非空；其余任务照常返回。
+	Error string `json:"error"`
+}
+
 // JobDetail 是任务详情。
 type JobDetail struct {
 	Name                string                `json:"name"`

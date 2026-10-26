@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { t } from "../i18n";
+import type { RefreshUi } from "../lib/refreshStatus";
 import type { ExecutorInfo, Overview } from "../types";
 import ExecutorList from "./ExecutorList.vue";
+import RefreshBadge from "./RefreshBadge.vue";
 
 const props = defineProps<{
   overview: Overview | null;
   loading: boolean;
   executors: ExecutorInfo[];
   loadingExecutors: boolean;
+  refresh: RefreshUi;
 }>();
 
 const emit = defineEmits<{ refresh: []; openExecutor: [row: ExecutorInfo] }>();
@@ -32,7 +35,30 @@ const executorPercent = computed(() => {
           {{ overview.version || "?" }}
         </p>
       </div>
-      <button type="button" class="ghost" @click="emit('refresh')">{{ t("refresh") }}</button>
+      <div class="head-actions">
+        <RefreshBadge
+          :mode="refresh.mode"
+          :paused="refresh.paused"
+          :in-flight="refresh.inFlight"
+          :last-at="refresh.lastAt"
+          :interval-ms="refresh.intervalMs"
+        />
+        <button
+          type="button"
+          class="ghost"
+          :class="{ done: refresh.refreshed }"
+          :disabled="refresh.refreshing"
+          @click="emit('refresh')"
+        >
+          {{
+            refresh.refreshing
+              ? t("refreshing")
+              : refresh.refreshed
+                ? t("refreshed")
+                : t("refresh")
+          }}
+        </button>
+      </div>
     </header>
 
     <p v-if="loading" class="empty">{{ t("loading") }}</p>
@@ -108,6 +134,13 @@ const executorPercent = computed(() => {
   gap: 12px;
 }
 
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
 h1 {
   margin: 0;
   font-size: 20px;
@@ -132,6 +165,18 @@ h1 {
 .ghost:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.ghost:disabled {
+  opacity: 0.55;
+  cursor: default;
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.ghost.done {
+  border-color: var(--success);
+  color: var(--success);
 }
 
 .empty {

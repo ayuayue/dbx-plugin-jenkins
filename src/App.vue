@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import logoUrl from "../assets/plugin.svg";
 import { describeError, jenkinsApi, setConnectionId } from "./api";
+import BatchBuildDialog from "./components/BatchBuildDialog.vue";
 import BuildView from "./components/BuildView.vue";
 import ConfirmAction from "./components/ConfirmAction.vue";
 import ConfirmDelete from "./components/ConfirmDelete.vue";
@@ -17,6 +18,22 @@ import ToastHost from "./components/ToastHost.vue";
 import ViewEditor from "./components/ViewEditor.vue";
 import { locale, syncLocale, t } from "./i18n";
 import {
+  MAX_BATCH_JOBS,
+  abortedChunk,
+  batchTargets,
+  buildParamValues,
+  chunkJobs,
+  collectSharedParameters,
+  countOutsideCurrent,
+  failedChunk,
+  rememberTargets,
+  selectVisible,
+  shouldAbortChunks,
+  summarizeBatch,
+  toggleJobSelection,
+  type BatchTargetMap,
+} from "./lib/batchBuild";
+import {
   createCancelRequest,
   createStopRequest,
   isStopTarget,
@@ -26,11 +43,20 @@ import {
 } from "./lib/confirmRequest";
 import { resolveEnterActions, shouldRefreshOnEnter, type AppView } from "./lib/enterRefresh";
 import { errorText } from "./lib/errors";
+import { createHistoryBridge } from "./lib/historyBridge";
+import {
+  NAV_MOUSE_FALLBACK_MS,
+  createNavDeduper,
+  resolveMouseButton,
+  type NavDirection,
+} from "./lib/mouseNav";
+import { createNavStack, type NavEntry } from "./lib/navStack";
 import { diffBuildRows, type RefreshUi } from "./lib/refreshStatus";
 import { createToastQueue, type ToastItem, type ToastTone } from "./lib/toast";
 import {
   AUTO_REFRESH_INTERVAL_MS,
-  EXECUTOR_AUTO_REFRESH_INTERVAL_MS,
+  OVERVIEW_AUTO_REFRESH_INTERVAL_MS,
+  OVERVIEW_IDLE_REFRESH_INTERVAL_MS,
   POLL_TIMEOUT_MS,
   QUEUE_AUTO_REFRESH_INTERVAL_MS,
   STAGE_AUTO_REFRESH_INTERVAL_MS,
@@ -38,8 +64,8 @@ import {
   createPendingBuild,
   evaluatePendingBuild,
   hasRunningBuild,
-  hasRunningExecutor,
   hasRunningStage,
+  resolveOverviewRefresh,
   shouldPollBuildDetail,
   shouldRefreshJobsAfterPending,
   type AutoRefresher,
@@ -53,6 +79,8 @@ import {
   resolveJoinAction,
 } from "./lib/viewRefresh";
 import type {
+  BatchBuildResult,
+  BatchTargetInfo,
   BuildDetail,
   BuildSummary,
   CreateJobPayload,
@@ -64,6 +92,7 @@ import type {
   JobUpdateFields,
   NodeInfo,
   Overview,
+  ParameterDefinition,
   QueueItem,
   StageInfo,
   StageMatrix,
@@ -100,6 +129,29 @@ const queueItems = ref<QueueItem[]>([]);
 const nodes = ref<NodeInfo[]>([]);
 /** 概览页的执行器槽位明细。 */
 const executors = ref<ExecutorInfo[]>([]);
+
+/**
+ * 页面导航历史：鼠标侧键、宿主的前进后退、页面内「返回」共用这一条路径。
+ *
+ * 内部栈是唯一真相；宿主 history 只做 1:1 镜像，好让系统级的 back/forward
+ * 能落到我们的 popstate 上。镜像写不进去（file:// 等）时自动降级为内部栈。
+ */
+const navStack = createNavStack({
+  view: "overview",
+  activeView: "",
+  folder: "",
+  job: "",
+  build: null,
+});
+/** 同一次按键可能派发多个事件，也可能同时命中宿主与 DOM 两条通道。 */
+const navDedupe = createNavDeduper();
+const navHistory = createHistoryBridge();
+const canNavBack = ref(false);
+const canNavForward = ref(false);
+/** 回放历史期间为 true：期间的内部状态变化不再记入历史。 */
+let navApplying = false;
+/** DOM 通道的待决项：popstate 一到就说明宿主接了这一下，取消自己的兜底。 */
+let navAwaitingPop: { direction: NavDirection; timer: number } | null = null;
 
 const loadingJobs = ref(false);
 const loadingJob = ref(false);
@@ -149,6 +201,34 @@ const confirmBusy = ref(false);
 const editorBusy = ref(false);
 const viewJobPool = ref<string[]>([]);
 
+/** 批量构建：多选模式、选中集合、确认弹窗（预检 → 确认 → 执行 → 结果）。 */
+const batchMode = ref(false);
+const batchSelected = ref<string[]>([]);
+/** 跨视图的已选任务快照：切到别的视图后仍能展示名字与状态。 */
+const batchTargetMap = ref<BatchTargetMap>({});
+/** 弹窗里「跳过正在构建 / 排队中」的勾选值，默认开启。 */
+const batchSkipBusy = ref(true);
+/** 本批共用参数：并集定义（仅 Boolean 开关）与用户填写值。 */
+const batchParamDefs = ref<ParameterDefinition[]>([]);
+const batchParamValues = ref<Record<string, unknown>>({});
+const batchDialog = ref<BatchDialogState | null>(null);
+
+interface BatchDialogState {
+  phase: "inspecting" | "confirm" | "running" | "done";
+  /** 预检结果（降级时为缓存快照）。 */
+  targets: BatchTargetInfo[];
+  results: BatchBuildResult[];
+  error: string;
+  /** 执行进度：已返回条数 / 总条数。 */
+  done: number;
+  total: number;
+}
+
+/** 已选任务里有多少不在当前列表（跨视图提示）。 */
+const batchOutsideCount = computed(() =>
+  countOutsideCurrent(batchSelected.value, jobs.value),
+);
+
 const canManageView = computed(() => isNamedView(activeView.value));
 
 const confirmTitle = computed(() => {
@@ -195,16 +275,27 @@ const isPipeline = computed(() =>
 /** 刚触发、还没在构建列表里出现的构建；存在时构建列表保持自动刷新。 */
 const pendingBuild = ref<PendingBuild | null>(null);
 
-type AutoRefreshMode = "builds" | "stages" | "build" | "queue" | "executors";
+type AutoRefreshMode =
+  | "builds"
+  | "stages"
+  | "build"
+  | "queue"
+  | "overview"
+  | "overviewIdle";
 
-/** 当前视图是否需要自动刷新：构建详情在跑、构建列表有构建中/刚触发、阶段有进行中、执行器被占用，或队列页常驻。 */
+/** 当前视图是否需要自动刷新：构建详情在跑、构建列表有构建中/刚触发、阶段有进行中、概览常驻双档，或队列页常驻。 */
 const autoRefreshMode = computed<AutoRefreshMode | null>(() => {
   if (view.value === "build" && shouldPollBuildDetail(selectedBuild.value)) {
     return "build";
   }
   if (view.value === "queue") return "queue";
-  // 概览页只在有执行器被占用时轮询：全空闲时执行状态不会变，零请求。
-  if (view.value === "overview" && hasRunningExecutor(executors.value)) return "executors";
+  // 概览页常驻：执行器被占用或队列非空走 5s 活跃档，否则 30s 低频兜底，
+  // 这样外部触发的构建、排队项进出、节点上下线都能自己冒出来。
+  if (view.value === "overview") {
+    return resolveOverviewRefresh(overview.value, executors.value) === "active"
+      ? "overview"
+      : "overviewIdle";
+  }
   if (view.value === "jobs" && selectedJob.value) {
     if (hasRunningBuild(builds.value)) return "builds";
     if (pendingBuild.value?.job === selectedJob.value.fullName) return "builds";
@@ -221,6 +312,9 @@ let jobsToken = 0;
 let selectToken = 0;
 let stageToken = 0;
 let buildToken = 0;
+/** 概览页两个数据源各留一个 token：轮询返回时若已被手动刷新超越就作废。 */
+let overviewToken = 0;
+let executorsToken = 0;
 
 function setError(error: unknown): void {
   errorMessage.value = errorText(describeError(error), locale.value);
@@ -296,8 +390,9 @@ function dismissToast(id: number): void {
 /**
  * 刷新左侧任务列表。
  * silent = true 时不置加载态、不清错误横幅，失败也不弹错，用于构建轮询与新建后的静默补刷。
+ * autoSelect = false 时不会自动选中第一个任务——历史回放要还原「这一屏本来没有选中」。
  */
-async function loadJobs(path: string, silent = false): Promise<void> {
+async function loadJobs(path: string, silent = false, autoSelect = true): Promise<void> {
   const token = ++jobsToken;
   if (!silent) {
     loadingJobs.value = true;
@@ -312,6 +407,8 @@ async function loadJobs(path: string, silent = false): Promise<void> {
 
     jobs.value = result.jobs;
     folder.value = path;
+    // 把当前列表并入跨视图缓存：已选任务切到别的视图后仍有名字与状态可展示。
+    batchTargetMap.value = rememberTargets(batchTargetMap.value, result.jobs);
     markRefreshed();
 
     const current = selectedJob.value?.fullName;
@@ -319,7 +416,7 @@ async function loadJobs(path: string, silent = false): Promise<void> {
       ? result.jobs.some((job) => job.fullName === current)
       : false;
     if (!stillThere) {
-      const first = result.jobs.find((job) => !job.isFolder);
+      const first = autoSelect ? result.jobs.find((job) => !job.isFolder) : undefined;
       if (first) {
         void selectJob(first, silent);
       } else {
@@ -363,20 +460,24 @@ async function activateView(name: string): Promise<void> {
   stageMatrix.value = null;
   resetBuilds();
   pendingBuild.value = null;
+  // 批量选择跨视图保留（需求 3）：切视图不再清空，底部条会提示有多少项不在当前视图。
   view.value = "jobs";
   await loadJobs("");
 }
 
 async function loadOverview(): Promise<void> {
+  const token = ++overviewToken;
   loadingView.value = true;
   errorMessage.value = "";
   try {
-    overview.value = await jenkinsApi.overview();
+    const result = await jenkinsApi.overview();
+    if (token !== overviewToken) return;
+    overview.value = result;
     markRefreshed();
   } catch (error) {
-    setError(error);
+    if (token === overviewToken) setError(error);
   } finally {
-    loadingView.value = false;
+    if (token === overviewToken) loadingView.value = false;
   }
 }
 
@@ -385,20 +486,24 @@ async function loadOverview(): Promise<void> {
  * 独立加载态：面板失败不该把整页概览数字一起拖成错误页。
  */
 async function loadExecutors(): Promise<void> {
+  const token = ++executorsToken;
   loadingExecutors.value = true;
   try {
     const result = await jenkinsApi.executors();
+    if (token !== executorsToken) return;
     executors.value = result.executors;
     markRefreshed();
   } catch (error) {
-    setError(error);
+    if (token === executorsToken) setError(error);
   } finally {
-    loadingExecutors.value = false;
+    if (token === executorsToken) loadingExecutors.value = false;
   }
 }
 
 /** 概览页刷新入口：聚合数字与执行器明细一起刷。 */
 async function refreshOverview(): Promise<void> {
+  // 先重置倒计时：否则手动刷新后轮询可能紧接着又发一轮。
+  autoRefresher?.restart();
   await Promise.all([loadOverview(), loadExecutors()]);
 }
 
@@ -482,10 +587,226 @@ async function refreshOnEnter(): Promise<void> {
   if (target !== view.value) void refreshOnEnter();
 }
 
+/* ── 页面导航历史（鼠标侧键 / 宿主前进后退） ───────────────── */
+
+/** 当前状态快照；overrides 用来记录「已经设置好」的目标状态。 */
+function navEntry(overrides: Partial<NavEntry> = {}): NavEntry {
+  return {
+    view: view.value,
+    activeView: activeView.value,
+    folder: folder.value,
+    job: selectedJob.value?.fullName ?? "",
+    build: view.value === "build" ? (selectedBuild.value?.number ?? null) : null,
+    ...overrides,
+  };
+}
+
+function syncNavFlags(): void {
+  canNavBack.value = navStack.canBack();
+  canNavForward.value = navStack.canForward();
+}
+
+/** 记录一次用户导航：内部栈压一条，宿主栈跟着压一条（重复条目不写）。 */
+function recordNav(entry: NavEntry = navEntry()): void {
+  if (navApplying) return;
+  const result = navStack.push(entry);
+  if (result.added) navHistory.push(result.index);
+  syncNavFlags();
+}
+
+/** 取消 DOM 通道的待决兜底。 */
+function cancelAwaitingPop(): void {
+  if (!navAwaitingPop) return;
+  window.clearTimeout(navAwaitingPop.timer);
+  navAwaitingPop = null;
+}
+
+/**
+ * 关掉盖在页面最上面的一层弹窗：后退优先收 UI，不消耗页面历史。
+ * 写入进行中时只吞掉这次按键——强行关窗会丢掉正在跑的请求状态。
+ */
+function closeTopLayer(): boolean {
+  const layer =
+    batchDialog.value ||
+    jobEditor.value ||
+    viewEditor.value ||
+    deleteTarget.value ||
+    pendingConfirm.value ||
+    showParams.value;
+  if (!layer) return false;
+  if (editorBusy.value || confirmBusy.value || batchDialog.value?.phase === "running") {
+    return true;
+  }
+  if (batchDialog.value) {
+    batchDialog.value = null;
+    return true;
+  }
+  if (jobEditor.value) {
+    jobEditor.value = null;
+    return true;
+  }
+  if (viewEditor.value) {
+    viewEditor.value = null;
+    return true;
+  }
+  if (deleteTarget.value) {
+    deleteTarget.value = null;
+    return true;
+  }
+  if (pendingConfirm.value) {
+    pendingConfirm.value = null;
+    return true;
+  }
+  showParams.value = false;
+  return true;
+}
+
+/**
+ * 回放一条历史记录。只恢复状态，不再写新历史。
+ *
+ * 数据按页补齐：切页走进入刷新；任务 / 构建 / 阶段必须精确定位到
+ * 具体任务与构建号，不能依赖「自动选中第一个」，否则退回去看到的
+ * 可能是另一条任务。
+ */
+async function applyEntry(entry: NavEntry): Promise<void> {
+  navApplying = true;
+  try {
+    if (entry.activeView !== activeView.value) activeView.value = entry.activeView;
+
+    if (entry.view === "overview" || entry.view === "queue" || entry.view === "nodes") {
+      view.value = entry.view;
+      await refreshOnEnter();
+      return;
+    }
+
+    // 构建详情与阶段视图都挂在某个任务上：先把左侧定位过去。
+    view.value = "jobs";
+    await loadJobs(entry.folder, true, entry.job !== "");
+    if (!entry.job) {
+      selectedJob.value = null;
+      selectedBuild.value = null;
+      stageMatrix.value = null;
+      resetBuilds();
+      return;
+    }
+    if (selectedJob.value?.fullName !== entry.job) {
+      await selectJob({ fullName: entry.job }, true);
+    }
+    if (entry.view === "stages") {
+      view.value = "stages";
+      await loadStages(entry.job);
+      return;
+    }
+    if (entry.view === "build" && entry.build !== null) {
+      // rememberReturn = false：回放不算「用户新开详情」，不重复记历史。
+      await openBuild(entry.build, false);
+    }
+  } finally {
+    navApplying = false;
+    syncNavFlags();
+  }
+}
+
+/** 回放串行化：连续两次 popstate 不能并行拉数据，否则旧响回填会盖掉新状态。 */
+let navQueue: Promise<void> = Promise.resolve();
+
+function enqueueEntry(entry: NavEntry): Promise<void> {
+  navQueue = navQueue.then(() => applyEntry(entry)).catch(() => undefined);
+  return navQueue;
+}
+
+/**
+ * 后退一步。
+ *
+ * - `moved`：已经接管（数据可能还在异步加载）
+ * - `closed`：只关了一层弹窗，页面没动
+ * - `none`：无处可退，调用方可以走自己的兜底
+ */
+async function navBack(): Promise<"moved" | "closed" | "none"> {
+  if (navApplying) return "none";
+  if (closeTopLayer()) return "closed";
+  if (!navStack.canBack()) return "none";
+  // 宿主栈可用就交给它走一格：popstate 回来时统一回放，避免两套游标各走各的。
+  if (navHistory.go(-1)) return "moved";
+  navStack.back();
+  await enqueueEntry(navStack.current());
+  return "moved";
+}
+
+async function navForward(): Promise<"moved" | "closed" | "none"> {
+  if (navApplying) return "none";
+  if (closeTopLayer()) return "closed";
+  if (!navStack.canForward()) return "none";
+  if (navHistory.go(1)) return "moved";
+  navStack.forward();
+  await enqueueEntry(navStack.current());
+  return "moved";
+}
+
+/**
+ * 鼠标侧键。宿主有两种处理方式，必须都覆盖：
+ *
+ * - 当浏览器命令：宿主先发 popstate，我们什么都不做；
+ * - 不处理：页面能收到 mouseup（button 3 / 4），由我们发起导航。
+ *
+ * 所以收到 DOM 事件后先空等 NAV_MOUSE_FALLBACK_MS，期间 popstate 先到就作废自己，
+ * 否则一次按键会退两步。
+ */
+function handleMouseNavButton(event: MouseEvent): void {
+  const direction = resolveMouseButton(event.button);
+  if (!direction) return;
+  // 侧键自身没有默认行为，但宿主可能把它映射成滚动之类，一律拦掉。
+  event.preventDefault();
+  if (!navDedupe.accept(direction)) return;
+
+  cancelAwaitingPop();
+  const timer = window.setTimeout(() => {
+    navAwaitingPop = null;
+    void (direction === "back" ? navBack() : navForward());
+  }, NAV_MOUSE_FALLBACK_MS);
+  navAwaitingPop = { direction, timer };
+}
+
+/** 宿主或浏览器历史变了：按它给的游标对齐内部栈并回放。 */
+function handlePopState(): void {
+  // 宿主已经接了这一下，DOM 兜底不必再补一次。
+  cancelAwaitingPop();
+  const index = navHistory.index();
+  if (index === null) {
+    // 不是我们写的条目（用户退到了宿主自己的页面）：只校正按钮状态。
+    syncNavFlags();
+    return;
+  }
+  void enqueueEntry(navStack.restore(index));
+}
+
 /** 侧栏导航：切页后按当前页补刷一次。 */
 async function switchView(next: "overview" | "jobs" | "queue" | "nodes"): Promise<void> {
   view.value = next;
+  recordNav(navEntry({ view: next }));
   await refreshOnEnter();
+}
+
+/** 点任务：切到该任务并记入历史。 */
+async function openJob(job: JobSummary): Promise<void> {
+  await selectJob(job);
+  // 请求期间用户可能已经切走：那一屏不是当前页，不该记进历史。
+  if (view.value !== "jobs") return;
+  recordNav(navEntry({ job: job.fullName }));
+}
+
+/** 文件夹导航（进入子目录 / 点面包屑上跳），也占一格历史。 */
+async function navigateFolder(path: string): Promise<void> {
+  await loadJobs(path);
+  if (view.value !== "jobs") return;
+  recordNav(navEntry({ folder: path }));
+}
+
+/** 切换视图 tab：同样占一格。 */
+async function chooseView(name: string): Promise<void> {
+  await activateView(name);
+  if (view.value !== "jobs") return;
+  recordNav(navEntry());
 }
 
 /** 队列「取消」只负责发起确认，真正调用在 confirmPending 里执行。 */
@@ -500,6 +821,11 @@ async function loadIdentity(): Promise<void> {
   try {
     const result = await jenkinsApi.whoami();
     readOnly.value = result.readOnly;
+    // 连接变成只读就退出多选：底部操作条留着只会点到「被后端拒绝」。
+    if (result.readOnly) {
+      batchMode.value = false;
+      batchSelected.value = [];
+    }
     identity.value = {
       name: result.user?.name ?? "",
       version: result.user?.version ?? "",
@@ -557,6 +883,8 @@ async function selectJob(
 async function openExecutorJob(row: ExecutorInfo): Promise<void> {
   if (!row.jobName) return;
   await selectJob({ fullName: row.jobName });
+  if (view.value !== "jobs") return;
+  recordNav(navEntry({ job: row.jobName }));
 }
 
 async function refreshJob(silent = false): Promise<void> {
@@ -581,8 +909,13 @@ async function openBuild(number: number, rememberReturn = true): Promise<void> {
   try {
     const detail = await jenkinsApi.build(job, number);
     if (token !== buildToken) return;
+    // 用户主动点开、但响应回来时已经在回放另一屏：别再把他拉回详情。
+    // （回放自己调 openBuild 时 rememberReturn=false，不受这条影响。）
+    if (rememberReturn && navApplying) return;
     selectedBuild.value = detail;
     view.value = "build";
+    // 只有用户主动点开才算一次导航；轮询 / 手动刷新（rememberReturn=false）不记历史。
+    if (rememberReturn) recordNav(navEntry({ view: "build", job, build: number }));
   } catch (error) {
     if (token === buildToken) setError(error);
   } finally {
@@ -596,18 +929,24 @@ async function refreshBuild(): Promise<void> {
   autoRefresher?.restart();
 }
 
-function closeBuild(): void {
+/**
+ * 构建详情「返回」= 后退一步，和鼠标侧键同义。
+ * 回放会走 applyEntry，列表顺带静默刷新，圆点/构建号不会停在旧值。
+ */
+async function closeBuild(): Promise<void> {
+  if ((await navBack()) !== "none") return;
+  // 兜底：历史栈里没有上一条（正常路径不会——打开详情必留一条）时退回进入前的页面。
   view.value = buildReturnView.value === "stages" ? "stages" : "jobs";
   if (view.value === "stages") {
     void refreshStages();
     return;
   }
-  // 详情页停留期间列表没有轮询，回来补一次静默刷新，避免圆点/构建号停在旧值。
   void refreshJob(true);
 }
 
-/** 阶段视图返回任务列表：阶段页期间列表没有轮询，回来同样补一次静默刷新。 */
+/** 阶段视图返回任务列表：同样走后退，列表刷新由回放负责。 */
 async function backToJobs(): Promise<void> {
+  if ((await navBack()) !== "none") return;
   view.value = "jobs";
   await refreshJob(true);
 }
@@ -702,12 +1041,25 @@ async function pollQueue(): Promise<void> {
   queueItems.value = result.items;
 }
 
-/** 静默刷新执行器明细：概览页有槽位被占用时轮询，全空闲后自动停。 */
-async function pollExecutors(): Promise<void> {
+/**
+ * 静默刷新概览：聚合数字与执行器明细并行拉，一轮里两侧一起收敛。
+ * 一个接口挂掉不丢另一份数据，但仍抛出失败交给轮询护栏计数。
+ */
+async function pollOverview(): Promise<void> {
   if (view.value !== "overview" || pageHidden()) return;
-  const result = await jenkinsApi.executors(POLL_TIMEOUT_MS);
+  const headToken = overviewToken;
+  const slotToken = executorsToken;
+  const [head, slots] = await Promise.allSettled([
+    jenkinsApi.overview(POLL_TIMEOUT_MS),
+    jenkinsApi.executors(POLL_TIMEOUT_MS),
+  ]);
   if (view.value !== "overview") return;
-  executors.value = result.executors;
+  // 期间手动刷新过：它写的是更新的数据，本轮整体作废，别用旧响应覆盖。
+  if (headToken !== overviewToken || slotToken !== executorsToken) return;
+  if (head.status === "fulfilled") overview.value = head.value;
+  if (slots.status === "fulfilled") executors.value = slots.value.executors;
+  if (head.status === "rejected") throw head.reason;
+  if (slots.status === "rejected") throw slots.reason;
 }
 
 /** 连续失败多少次后判定 Jenkins 不可用并暂停轮询。 */
@@ -723,7 +1075,8 @@ const AUTO_REFRESH_TASKS: Record<AutoRefreshMode, () => Promise<void>> = {
   build: pollBuildDetail,
   stages: pollStages,
   queue: pollQueue,
-  executors: pollExecutors,
+  overview: pollOverview,
+  overviewIdle: pollOverview,
 };
 
 const AUTO_REFRESH_INTERVALS: Record<AutoRefreshMode, number> = {
@@ -731,10 +1084,13 @@ const AUTO_REFRESH_INTERVALS: Record<AutoRefreshMode, number> = {
   build: AUTO_REFRESH_INTERVAL_MS,
   stages: STAGE_AUTO_REFRESH_INTERVAL_MS,
   queue: QUEUE_AUTO_REFRESH_INTERVAL_MS,
-  executors: EXECUTOR_AUTO_REFRESH_INTERVAL_MS,
+  overview: OVERVIEW_AUTO_REFRESH_INTERVAL_MS,
+  overviewIdle: OVERVIEW_IDLE_REFRESH_INTERVAL_MS,
 };
 
 function startAutoRefresh(mode: AutoRefreshMode): void {
+  // 同一时刻只允许一个轮询器：重复调用（模式切换与首屏补启动撞车）会叠出第二个定时器。
+  if (autoRefresher?.active) return;
   const refresher = createAutoRefresher({
     intervalMs: AUTO_REFRESH_INTERVALS[mode],
     task: AUTO_REFRESH_TASKS[mode],
@@ -809,6 +1165,7 @@ watch(autoRefreshMode, (mode, previous) => {
 async function openStages(): Promise<void> {
   if (!selectedJob.value || !isPipeline.value) return;
   view.value = "stages";
+  recordNav(navEntry({ view: "stages" }));
   await loadStages(selectedJob.value.fullName);
 }
 
@@ -838,6 +1195,250 @@ async function triggerBuild(params: Record<string, unknown> = {}): Promise<void>
   } catch (error) {
     setError(error);
   }
+}
+
+/** 进入/退出多选模式；退出时清空选择，下次进来不带旧任务。 */
+function toggleBatchMode(): void {
+  if (readOnly.value) {
+    showToast(t("readOnlyManageHint"), "info");
+    return;
+  }
+  batchMode.value = !batchMode.value;
+  if (!batchMode.value) batchSelected.value = [];
+}
+
+function toggleBatchJob(fullName: string): void {
+  const next = toggleJobSelection(batchSelected.value, fullName);
+  // 去掉勾选会变短，只有「撞上限」才会原样返回同一个数组。
+  if (next === batchSelected.value) {
+    showToast(t("batchLimit", { max: MAX_BATCH_JOBS }), "info");
+    return;
+  }
+  batchSelected.value = next;
+}
+
+/** 全选当前可见任务：文件夹不参与，仍受上限约束。 */
+function selectAllVisibleBatch(list: JobSummary[]): void {
+  batchSelected.value = selectVisible(batchSelected.value, list);
+  if (batchSelected.value.length >= MAX_BATCH_JOBS) {
+    showToast(t("batchLimit", { max: MAX_BATCH_JOBS }), "info");
+  }
+}
+
+function clearBatchSelection(): void {
+  batchSelected.value = [];
+}
+
+/** 预检失败时的降级清单：用缓存快照，状态可能过期但还能继续构建。 */
+function fallbackTargets(names: string[]): BatchTargetInfo[] {
+  const cached = batchTargets(names, batchTargetMap.value);
+  const byName = new Map(cached.map((item) => [item.fullName, item]));
+  return names.map((fullName) => {
+    const target = byName.get(fullName);
+    return {
+      name: target?.name ?? fullName.split("/").pop() ?? fullName,
+      fullName,
+      status: target?.status ?? "unknown",
+      building: target?.building ?? false,
+      buildable: true,
+      inQueue: false,
+      parameters: null,
+    };
+  });
+}
+
+/** 重算共享参数（仅 Boolean 开关），保留用户已填过的值。 */
+function applySharedParameters(targets: BatchTargetInfo[]): void {
+  const shared = collectSharedParameters(targets);
+  const defaults = buildParamValues(shared.parameters);
+  const values: Record<string, unknown> = {};
+  for (const parameter of shared.parameters) {
+    values[parameter.name] =
+      parameter.name in batchParamValues.value
+        ? batchParamValues.value[parameter.name]
+        : defaults[parameter.name];
+  }
+  batchParamDefs.value = shared.parameters;
+  batchParamValues.value = values;
+}
+
+/** 点「构建所选」：先预检拿实时状态与参数定义，再进确认态。 */
+async function openBatchBuild(): Promise<void> {
+  const names = [...batchSelected.value];
+  if (!names.length) {
+    showToast(t("batchEmpty"), "info");
+    return;
+  }
+  batchParamDefs.value = [];
+  batchParamValues.value = {};
+  batchDialog.value = {
+    phase: "inspecting",
+    targets: fallbackTargets(names),
+    results: [],
+    error: "",
+    done: 0,
+    total: names.length,
+  };
+
+  try {
+    const result = await jenkinsApi.batchInspect(names);
+    applySharedParameters(result.targets);
+    batchDialog.value = {
+      phase: "confirm",
+      targets: result.targets,
+      results: [],
+      error: "",
+      done: 0,
+      total: result.targets.length,
+    };
+  } catch (error) {
+    // 预检失败不堵死构建：用缓存状态 + 默认参数继续，弹窗里给出提示。
+    batchDialog.value = {
+      phase: "confirm",
+      targets: fallbackTargets(names),
+      results: [],
+      error: describeError(error),
+      done: 0,
+      total: names.length,
+    };
+  }
+}
+
+/**
+ * 分批执行批量构建：每批 10 个串行调用，回来一批推进一次进度。
+ * 单批失败只标记这一批，其余批次继续；连续 2 批失败才中止剩余（标记「未执行」）。
+ * 这样整批超时不会让「已触发的部分」变成不可知状态。
+ */
+async function executeBatch(
+  names: string[],
+  skipBusy: boolean,
+  params: Record<string, unknown>,
+): Promise<void> {
+  const targets = [...names];
+  const total = targets.length;
+  if (!total) {
+    batchDialog.value = null;
+    return;
+  }
+  batchSkipBusy.value = skipBusy;
+  batchDialog.value = {
+    phase: "running",
+    targets: batchDialog.value?.targets ?? [],
+    results: [],
+    error: "",
+    done: 0,
+    total,
+  };
+
+  const collected: BatchBuildResult[] = [];
+  let consecutiveFailures = 0;
+  const chunks = chunkJobs(targets);
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
+    try {
+      const result = await jenkinsApi.batchBuild(chunk, skipBusy, params);
+      collected.push(...result.results);
+      consecutiveFailures = 0;
+    } catch (error) {
+      collected.push(...failedChunk(chunk, describeError(error)));
+      consecutiveFailures += 1;
+    }
+
+    batchDialog.value = {
+      phase: "running",
+      targets: batchDialog.value?.targets ?? [],
+      results: [...collected],
+      error: "",
+      done: collected.length,
+      total,
+    };
+
+    if (shouldAbortChunks(consecutiveFailures)) {
+      collected.push(...abortedChunk(chunks.slice(index + 1).flat()));
+      break;
+    }
+  }
+
+  const summary = summarizeBatch(collected);
+  batchDialog.value = {
+    phase: "done",
+    targets: batchDialog.value?.targets ?? [],
+    results: collected,
+    error: "",
+    done: total,
+    total,
+  };
+  showToast(
+    t("batchResultSummary", {
+      queued: summary.queued,
+      skipped: summary.skipped,
+      failed: summary.failed,
+    }),
+    summary.failed ? "info" : "success",
+  );
+
+  // 触发后补刷：左侧圆点/构建号立即更新，当前任务在批内则跟踪它的新构建；
+  // 800ms 再补一次，让刚进队列的构建尽快反映到列表（与单任务触发一致）。
+  const current = selectedJob.value;
+  if (current && targets.includes(current.fullName)) {
+    pendingBuild.value = createPendingBuild(
+      current.fullName,
+      current.lastBuild?.number ?? 0,
+    );
+    void refreshJob(true);
+  }
+  void loadJobs(folder.value, true);
+  window.setTimeout(() => void loadJobs(folder.value, true), 800);
+}
+
+/** 确认弹窗 → 用确认清单里的任务执行，并退出多选模式（需求 2）。 */
+async function runBatchBuild(
+  skipBusy: boolean,
+  values: Record<string, unknown>,
+): Promise<void> {
+  const dialog = batchDialog.value;
+  if (!dialog) return;
+  const names = dialog.targets.map((target) => target.fullName);
+  batchParamValues.value = values;
+  // 结果弹窗只用 results 与 targets 快照，不依赖选择，所以可以立刻退出多选。
+  batchMode.value = false;
+  batchSelected.value = [];
+  await executeBatch(names, skipBusy, values);
+}
+
+/** 结果页「重试失败项」：只重跑真失败的任务，不再弹确认。 */
+function retryFailedBatch(): void {
+  const dialog = batchDialog.value;
+  if (!dialog) return;
+  const failed = dialog.results
+    .filter((item) => !item.success && !item.skipped)
+    .map((item) => item.job);
+  if (!failed.length) return;
+  void executeBatch(failed, batchSkipBusy.value, batchParamValues.value);
+}
+
+/** 确认弹窗里就地剔除一个任务；剔空即关闭弹窗。 */
+function removeBatchTarget(fullName: string): void {
+  batchSelected.value = batchSelected.value.filter((name) => name !== fullName);
+  const dialog = batchDialog.value;
+  if (!dialog) return;
+  const targets = dialog.targets.filter((target) => target.fullName !== fullName);
+  if (!targets.length) {
+    batchDialog.value = null;
+    return;
+  }
+  applySharedParameters(targets);
+  batchDialog.value = { ...dialog, targets, total: targets.length };
+}
+
+/** Shift 区间连选：JobList 已按可见顺序算好整份集合。 */
+function replaceBatchSelection(names: string[]): void {
+  batchSelected.value = names;
+}
+
+function closeBatchDialog(): void {
+  batchDialog.value = null;
 }
 
 /** 两个「停止」入口（任务页 / 构建页）都先弹确认，不直接发请求。 */
@@ -1261,12 +1862,30 @@ onMounted(async () => {
   applyTheme();
   window.addEventListener("dbx-plugin-env", handleEnv);
   document.addEventListener("visibilitychange", handleVisibility);
+  // 两个都监听：不同宿主在不同阶段派发侧键事件，去抖器保证一次按键只走一次。
+  window.addEventListener("mousedown", handleMouseNavButton);
+  window.addEventListener("mouseup", handleMouseNavButton);
+  window.addEventListener("popstate", handlePopState);
   await loadIdentity();
+  // 首屏游标用 replace 写进当前条目（不新增记录）：放在 loadIdentity 之后，
+  // 是因为 activeView 要等 loadViews 拉完才定下来，否则初始条目会留下空视图名。
+  // 之后每次导航都 push，宿主栈与内部栈保持 1:1 对应。
+  navStack.reset(navEntry());
+  navHistory.replace(0);
+  syncNavFlags();
+  // 概览页初始 mode 就是 overviewIdle，没有「null → 非 null」的变化过程，
+  // watch 不会触发；这里补一次首次启动，否则全空闲时要等到切页才开始轮询。
+  const initialMode = autoRefreshMode.value;
+  if (initialMode && !pageHidden()) startAutoRefresh(initialMode);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("dbx-plugin-env", handleEnv);
   document.removeEventListener("visibilitychange", handleVisibility);
+  window.removeEventListener("mousedown", handleMouseNavButton);
+  window.removeEventListener("mouseup", handleMouseNavButton);
+  window.removeEventListener("popstate", handlePopState);
+  cancelAwaitingPop();
   if (changedTimer) window.clearTimeout(changedTimer);
   if (manualDoneTimer) window.clearTimeout(manualDoneTimer);
   toastQueue.clear();
@@ -1284,6 +1903,33 @@ onBeforeUnmount(() => {
           <strong>{{ t("appTitle") }}</strong>
           <span class="subtle" :title="connectionName">{{ connectionLabel }}</span>
         </div>
+      </div>
+
+      <div class="nav-history">
+        <button
+          type="button"
+          class="nav-step"
+          :disabled="!canNavBack"
+          :title="t('navBack')"
+          :aria-label="t('navBack')"
+          @click="navBack()"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="nav-step"
+          :disabled="!canNavForward"
+          :title="t('navForward')"
+          :aria-label="t('navForward')"
+          @click="navForward()"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
       </div>
 
       <div class="topbar-right">
@@ -1363,7 +2009,8 @@ onBeforeUnmount(() => {
           :loading="loadingView"
           :executors="executors"
           :loading-executors="loadingExecutors"
-          @refresh="refreshOverview"
+          :refresh="refreshUi"
+          @refresh="refreshCurrent"
           @open-executor="openExecutorJob"
         />
 
@@ -1419,15 +2066,24 @@ onBeforeUnmount(() => {
             :views="views"
             :active-view="activeView"
             :read-only="readOnly"
-            @select="selectJob"
-            @open-folder="loadJobs($event.fullName)"
-            @navigate="loadJobs"
-            @select-view="activateView"
+            :batch-mode="batchMode"
+            :batch-selected="batchSelected"
+            :batch-outside-count="batchOutsideCount"
+            @select="openJob"
+            @open-folder="navigateFolder($event.fullName)"
+            @navigate="navigateFolder"
+            @select-view="chooseView"
             @refresh="loadJobs(folder)"
             @create-job="openCreateJob"
             @create-view="openCreateView"
             @edit-view="openEditView"
             @delete-view="openDeleteView"
+            @toggle-batch-mode="toggleBatchMode"
+            @toggle-batch-job="toggleBatchJob"
+            @select-all-visible="selectAllVisibleBatch"
+            @replace-batch-selection="replaceBatchSelection"
+            @clear-batch="clearBatchSelection"
+            @build-batch="openBatchBuild"
           />
 
           <JobView
@@ -1512,6 +2168,23 @@ onBeforeUnmount(() => {
       @cancel="cancelPending"
     />
 
+    <BatchBuildDialog
+      v-if="batchDialog"
+      :targets="batchDialog.targets"
+      :phase="batchDialog.phase"
+      :skip-busy="batchSkipBusy"
+      :results="batchDialog.results"
+      :progress="{ done: batchDialog.done, total: batchDialog.total }"
+      :error="batchDialog.error"
+      :parameters="batchParamDefs"
+      :param-values="batchParamValues"
+      @confirm="runBatchBuild"
+      @update:param-values="batchParamValues = $event"
+      @retry="retryFailedBatch"
+      @remove="removeBatchTarget"
+      @close="closeBatchDialog"
+    />
+
     <ToastHost :items="toasts" @dismiss="dismissToast" />
   </div>
 </template>
@@ -1526,13 +2199,48 @@ onBeforeUnmount(() => {
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
   height: 56px;
   padding: 0 18px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   flex: none;
+}
+
+/* 前进/后退箭头：鼠标侧键的可视化等价物，同时让禁用态一眼可见。 */
+.nav-history {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.nav-step {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+}
+
+.nav-step svg {
+  width: 15px;
+  height: 15px;
+}
+
+.nav-step:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--panel-soft);
+  color: var(--text);
+}
+
+.nav-step:disabled {
+  opacity: 0.32;
+  cursor: default;
 }
 
 .brand {
@@ -1572,6 +2280,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 10px;
   flex: none;
+  margin-left: auto;
 }
 
 .who {

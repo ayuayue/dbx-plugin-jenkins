@@ -1,7 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BuildDetail, BuildSummary, StageBuildInfo, StageInfo, StageMatrix } from "../types";
+import type {
+  BuildDetail,
+  BuildSummary,
+  ExecutorInfo,
+  Overview,
+  StageBuildInfo,
+  StageInfo,
+  StageMatrix,
+} from "../types";
 import {
   AUTO_REFRESH_INTERVAL_MS,
+  OVERVIEW_AUTO_REFRESH_INTERVAL_MS,
+  OVERVIEW_IDLE_REFRESH_INTERVAL_MS,
   PENDING_BUILD_TIMEOUT_MS,
   POLL_TIMEOUT_MS,
   QUEUE_AUTO_REFRESH_INTERVAL_MS,
@@ -10,9 +20,11 @@ import {
   createPendingBuild,
   evaluatePendingBuild,
   hasNewBuild,
+  hasQueuedBuild,
   hasRunningBuild,
   hasRunningExecutor,
   hasRunningStage,
+  resolveOverviewRefresh,
   shouldPollBuildDetail,
   shouldRefreshJobsAfterPending,
 } from "./refresh";
@@ -178,6 +190,14 @@ describe("refresh intervals", () => {
   it("polls the queue at a moderate cadence", () => {
     expect(QUEUE_AUTO_REFRESH_INTERVAL_MS).toBe(5000);
     expect(QUEUE_AUTO_REFRESH_INTERVAL_MS).toBeGreaterThan(AUTO_REFRESH_INTERVAL_MS);
+  });
+
+  it("polls the overview fast while work is in flight and slowly when idle", () => {
+    expect(OVERVIEW_AUTO_REFRESH_INTERVAL_MS).toBe(5000);
+    expect(OVERVIEW_IDLE_REFRESH_INTERVAL_MS).toBe(30_000);
+    expect(OVERVIEW_IDLE_REFRESH_INTERVAL_MS).toBeGreaterThan(
+      OVERVIEW_AUTO_REFRESH_INTERVAL_MS,
+    );
   });
 });
 
@@ -618,5 +638,58 @@ describe("hasRunningExecutor", () => {
     expect(hasRunningExecutor([idle, { ...idle, index: 2 }])).toBe(false);
     expect(hasRunningExecutor([])).toBe(false);
     expect(hasRunningExecutor(null)).toBe(false);
+  });
+});
+
+describe("hasQueuedBuild", () => {
+  const overview = (queueLength: number): Overview => ({ queueLength } as Overview);
+
+  it("队列里有排队项就算有活", () => {
+    expect(hasQueuedBuild(overview(3))).toBe(true);
+  });
+
+  it("队列为空、未加载时不算", () => {
+    expect(hasQueuedBuild(overview(0))).toBe(false);
+    expect(hasQueuedBuild(null)).toBe(false);
+    expect(hasQueuedBuild(undefined)).toBe(false);
+  });
+});
+
+describe("resolveOverviewRefresh", () => {
+  const slot = (index: number, busy: boolean): ExecutorInfo => ({
+    node: "",
+    nodeOffline: false,
+    index,
+    idle: !busy,
+    jobName: busy ? "demo" : "",
+    buildNumber: busy ? 3 : 0,
+    building: busy,
+    timestamp: busy ? 1700000000000 : 0,
+    estimatedDuration: busy ? 1000 : 0,
+    duration: busy ? 500 : 0,
+    result: "",
+    pending: false,
+  });
+  const overview = (queueLength: number): Overview => ({ queueLength } as Overview);
+
+  it("有执行器被占用就走活跃档", () => {
+    expect(resolveOverviewRefresh(overview(0), [slot(1, false), slot(2, true)])).toBe("active");
+  });
+
+  it("只有排队项、执行器全空闲也走活跃档", () => {
+    expect(resolveOverviewRefresh(overview(2), [slot(1, false)])).toBe("active");
+  });
+
+  it("全空闲且队列为空降到空闲档", () => {
+    expect(resolveOverviewRefresh(overview(0), [slot(1, false), slot(2, false)])).toBe("idle");
+  });
+
+  it("数据还没加载时按空闲档兜底", () => {
+    expect(resolveOverviewRefresh(null, null)).toBe("idle");
+    expect(resolveOverviewRefresh(undefined, undefined)).toBe("idle");
+  });
+
+  it("概览数字没拿到但执行器在忙，仍走活跃档", () => {
+    expect(resolveOverviewRefresh(null, [slot(1, true)])).toBe("active");
   });
 });
