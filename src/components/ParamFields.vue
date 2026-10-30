@@ -61,7 +61,7 @@ function onCheck(name: string, event: Event): void {
       </span>
 
       <select
-        v-if="parameter.type === 'ChoiceParameterDefinition'"
+        v-if="parameter.choices?.length"
         :value="textValue(parameter.name)"
         :disabled="isDisabled(parameter)"
         @change="onInput(parameter.name, $event)"
