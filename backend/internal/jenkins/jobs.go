@@ -152,8 +152,9 @@ func (c *Client) GetJob(ctx context.Context, fullName string) (*JobDetail, error
 		if configText, err := c.GetJobConfig(ctx, job.FullName); err == nil {
 			options := activeChoiceOptions(configText, activeChoice)
 			for index := range job.Parameters {
-				if values, ok := options[job.Parameters[index].Name]; ok {
-					job.Parameters[index].Choices = values
+				if info, ok := options[job.Parameters[index].Name]; ok {
+					job.Parameters[index].Choices = info.Choices
+					job.Parameters[index].MultiSelect = info.MultiSelect
 				}
 			}
 		}
@@ -165,18 +166,25 @@ func isActiveChoiceClass(class string) bool {
 	return strings.HasPrefix(class, "org.biouno.unochoice.")
 }
 
+// activeChoiceInfo 是从任务配置里能还原出来的 Active Choices 参数信息。
+type activeChoiceInfo struct {
+	Choices     []string
+	MultiSelect bool
+}
+
 var (
 	activeChoiceBlock = regexp.MustCompile(`(?s)<org\.biouno\.unochoice\.[A-Za-z]+Parameter\b[^>]*>(.*?)</org\.biouno\.unochoice\.[A-Za-z]+Parameter>`)
 	activeChoiceName  = regexp.MustCompile(`(?s)<name>([^<]*)</name>`)
 	activeChoiceCode  = regexp.MustCompile(`(?s)<script>([^<]*)</script>`)
+	activeChoiceType  = regexp.MustCompile(`(?s)<choiceType>([^<]*)</choiceType>`)
 	literalReturn     = regexp.MustCompile(`(?s)^\s*return\s*\[(.*)\]\s*;?\s*$`)
 	literalString     = regexp.MustCompile(`'([^']*)'|"([^"]*)"`)
 )
 
 // activeChoiceOptions 从任务配置里提取 Active Choices 参数的静态选项。
 // 只认 `return ['a', 'b']` 这种纯字面量脚本，动态脚本一律放弃。
-func activeChoiceOptions(configXML string, targets map[string]bool) map[string][]string {
-	options := map[string][]string{}
+func activeChoiceOptions(configXML string, targets map[string]bool) map[string]activeChoiceInfo {
+	options := map[string]activeChoiceInfo{}
 	for _, block := range activeChoiceBlock.FindAllStringSubmatch(configXML, -1) {
 		name := activeChoiceName.FindStringSubmatch(block[1])
 		if name == nil {
@@ -190,9 +198,15 @@ func activeChoiceOptions(configXML string, targets map[string]bool) map[string][
 		if code == nil {
 			continue
 		}
-		if values := literalStrings(html.UnescapeString(code[1])); len(values) > 0 {
-			options[key] = values
+		values := literalStrings(html.UnescapeString(code[1]))
+		if len(values) == 0 {
+			continue
 		}
+		info := activeChoiceInfo{Choices: values}
+		if choiceType := activeChoiceType.FindStringSubmatch(block[1]); choiceType != nil {
+			info.MultiSelect = strings.EqualFold(strings.TrimSpace(choiceType[1]), "PT_CHECKBOX")
+		}
+		options[key] = info
 	}
 	return options
 }

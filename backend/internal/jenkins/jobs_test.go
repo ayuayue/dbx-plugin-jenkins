@@ -146,6 +146,14 @@ func TestActiveChoiceOptionsStaticLiteral(t *testing.T) {
               <sandbox>true</sandbox>
             </secureScript>
           </script>
+          <choiceType>PT_CHECKBOX</choiceType>
+        </org.biouno.unochoice.ChoiceParameter>
+        <org.biouno.unochoice.ChoiceParameter>
+          <name>single</name>
+          <script class="org.biouno.unochoice.model.GroovyScript">
+            <secureScript><script>return ["only"]</script></secureScript>
+          </script>
+          <choiceType>PT_SINGLE_SELECT</choiceType>
         </org.biouno.unochoice.ChoiceParameter>
         <org.biouno.unochoice.ChoiceParameter>
           <name>dynamic</name>
@@ -158,8 +166,8 @@ func TestActiveChoiceOptionsStaticLiteral(t *testing.T) {
   </properties>
 </project>`
 
-	options := activeChoiceOptions(configXML, map[string]bool{"projectName": true, "dynamic": true})
-	got := options["projectName"]
+	options := activeChoiceOptions(configXML, map[string]bool{"projectName": true, "single": true, "dynamic": true})
+	got := options["projectName"].Choices
 	want := []string{"t6-auth", "t6-gateway", "t6-base"}
 	if len(got) != len(want) {
 		t.Fatalf("projectName options = %v, want %v", got, want)
@@ -169,8 +177,14 @@ func TestActiveChoiceOptionsStaticLiteral(t *testing.T) {
 			t.Fatalf("projectName options = %v, want %v", got, want)
 		}
 	}
+	if !options["projectName"].MultiSelect {
+		t.Errorf("PT_CHECKBOX should be multi-select")
+	}
+	if options["single"].MultiSelect {
+		t.Errorf("PT_SINGLE_SELECT must not be multi-select")
+	}
 	if _, ok := options["dynamic"]; ok {
-		t.Errorf("dynamic script should not produce literal options, got %v", options["dynamic"])
+		t.Errorf("dynamic script should not produce literal options, got %v", options["dynamic"].Choices)
 	}
 	if _, ok := options["env"]; ok {
 		t.Errorf("standard choice parameter must not be handled here")
@@ -193,6 +207,7 @@ func TestGetJobFillsActiveChoiceOptions(t *testing.T) {
 					<script class="org.biouno.unochoice.model.GroovyScript"><secureScript>
 						<script>return [&apos;t6-auth&apos;,&apos;t6-gateway&apos;]</script>
 					</secureScript></script>
+					<choiceType>PT_CHECKBOX</choiceType>
 				</org.biouno.unochoice.ChoiceParameter>
 			</parameterDefinitions></hudson.model.ParametersDefinitionProperty></properties></maven2-moduleset>`)
 		default:
@@ -215,5 +230,8 @@ func TestGetJobFillsActiveChoiceOptions(t *testing.T) {
 	}
 	if parameter.DefaultValue != "t6-auth" {
 		t.Errorf("default = %q, want t6-auth", parameter.DefaultValue)
+	}
+	if !parameter.MultiSelect {
+		t.Errorf("PT_CHECKBOX should surface multiSelect=true")
 	}
 }

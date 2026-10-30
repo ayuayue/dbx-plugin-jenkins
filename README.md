@@ -3,7 +3,7 @@
 在 DBX 内管理 Jenkins 任务、构建、控制台日志、队列与节点。
 
 - 插件 ID：`io.github.nixing178.jenkins`
-- 当前版本：`0.10.1`（Active Choices 参数渲染为下拉框）
+- 当前版本：`0.10.2`（Active Choices 参数：单选下拉 / 多选复选框）
 - 形态：Go Sidecar + Vue3 静态工作台
 - 许可证：Apache-2.0
 
@@ -281,7 +281,7 @@ git push origin main --tags
 | M13 批量构建 v3 | 已完成（0.9.0：`jenkins/batchInspect` 预检、共享参数一次填写全批生效、跨视图选择与「含 M 个其它视图」提示、确认后退出多选；176 后端 + 336 前端用例全绿） |
 | M13b 参数区只留开关 | 已完成（0.9.1：共享参数按类型过滤为 Boolean，其余参数各任务用默认值；移除 conflicts 机制；336 前端用例全绿） |
 | M13c 概览页自动刷新 | 已完成（0.9.2：活跃 5s / 空闲 30s 双档、概览数字与执行器明细一轮并行、概览页徽章与按钮三态；344 前端用例全绿） |
-| M14 Active Choices 参数 | 已完成（0.10.1：`org.biouno.unochoice.*` 参数从任务 config.xml 的脚本里提取静态选项，参数区渲染为下拉框；动态脚本与取不到选项时仍回退文本框） |
+| M14 Active Choices 参数 | 已完成（0.10.2：`org.biouno.unochoice.*` 参数从任务 config.xml 的脚本里提取静态选项；`PT_CHECKBOX` 渲染为复选框组、值按逗号拼接，其余渲染为下拉框；动态脚本与取不到选项时仍回退文本框） |
 
 > 任务列表已按 Jenkins 原生 Views 分组：顶部 Tab 切换视图，视图内分「文件夹 / 任务」两组。
 > Tab 溢出时左右箭头滚动，当前视图自动居中；打开视图自动选中首个任务；左栏宽 320px。
